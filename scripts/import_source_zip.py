@@ -23,8 +23,8 @@ def find_source():
         try:
             with zipfile.ZipFile(path) as z:
                 names = z.namelist()
-                if any(n.endswith(("settings.gradle", "settings.gradle.kts")) for n in names) \\
-                    and any("/app/src/main/AndroidManifest.xml" in n or n == "app/src/main/AndroidManifest.xml" for n in names):
+                if (any(n.endswith(("settings.gradle", "settings.gradle.kts")) for n in names)
+                        and any(n.endswith("app/src/main/AndroidManifest.xml") for n in names)):
                     valid.append(path)
         except (zipfile.BadZipFile, OSError):
             continue
