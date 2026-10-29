@@ -12,6 +12,30 @@ MAX_FILE = 70 * 1024 * 1024
 FORBIDDEN = (".github/", "scripts/", "ota/", ".git/", "docs/", "tests/")
 SOURCE = ROOT / "QR_LINK_SOURCE.zip"
 
+
+def find_source():
+    """Accept the named source ZIP or exactly one uploaded QR LINK Android source ZIP."""
+    if SOURCE.is_file():
+        return SOURCE
+    candidates = sorted(p for p in ROOT.glob("QR_LINK_v*.zip") if p.is_file())
+    valid = []
+    for path in candidates:
+        try:
+            with zipfile.ZipFile(path) as z:
+                names = z.namelist()
+                if any(n.endswith(("settings.gradle", "settings.gradle.kts")) for n in names) \\
+                    and any("/app/src/main/AndroidManifest.xml" in n or n == "app/src/main/AndroidManifest.xml" for n in names):
+                    valid.append(path)
+        except (zipfile.BadZipFile, OSError):
+            continue
+    if len(valid) == 1:
+        print("Auto-selected uploaded QR LINK source:", valid[0].name)
+        return valid[0]
+    if len(valid) > 1:
+        fail("Multiple versioned source ZIP files: keep only one or upload QR_LINK_SOURCE.zip")
+    fail("No app/ or Android source ZIP found. Upload QR_LINK_SOURCE.zip or QR_LINK_v*.zip")
+
+
 def fail(msg):
     raise SystemExit("QR LINK import: " + msg)
 
@@ -19,9 +43,8 @@ def main():
     if (ROOT / "app").exists():
         print("Android source directory already present; ZIP importer not needed")
         return
-    if not SOURCE.is_file():
-        fail("No app/ or QR_LINK_SOURCE.zip. Upload Android source ZIP.")
-    with zipfile.ZipFile(SOURCE) as z:
+    source = find_source()
+    with zipfile.ZipFile(source) as z:
         infos = [x for x in z.infolist() if not x.is_dir()]
         names = [x.filename for x in infos]
         roots = sorted({n[:-len("settings.gradle")] for n in names if n.endswith("settings.gradle")}
