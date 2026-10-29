@@ -248,11 +248,17 @@ public final class UpdateManager {
             if(archive==null)throw new IOException("Не удалось открыть APK");
             verifyApk(a,apk,archive.getLongVersionCode());
             Uri content=Uri.parse("content://"+a.getPackageName()+".updates/apk");
+            // A self-update kills the old QR LINK process. Launching the
+            // system installer as a child of our Activity can leave its
+            // post-install "Open" action attached to the dying task.
+            // Start the installer from the application context with NEW_TASK
+            // so Android keeps the installer and QR LINK in separate tasks.
             Intent view=new Intent(Intent.ACTION_VIEW);
             view.setDataAndType(content,"application/vnd.android.package-archive");
             view.setClipData(ClipData.newRawUri("QR LINK",content));
-            view.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
-            a.startActivity(view);
+            view.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION
+                | Intent.FLAG_ACTIVITY_NEW_TASK);
+            a.getApplicationContext().startActivity(view);
         }catch(Exception e){
             OtaProgressDialog screen=new OtaProgressDialog(a);
             screen.show();screen.fail(friendly(e),null);

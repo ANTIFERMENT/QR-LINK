@@ -203,7 +203,16 @@ public final class MainActivity extends Activity {
         super.onSaveInstanceState(state);
     }
     @Override protected void onNewIntent(Intent intent){
-        super.onNewIntent(intent);setIntent(intent);incomingShare(intent);
+        super.onNewIntent(intent);
+        setIntent(intent);
+        // The installer may reopen an existing launcher task after replacing
+        // the package. Always make this explicit MAIN/LAUNCHER request visible.
+        if(intent!=null&&Intent.ACTION_MAIN.equals(intent.getAction())
+            &&intent.hasCategory(Intent.CATEGORY_LAUNCHER)
+            &&page!=HOME&&!navigating){
+            navigate(HOME);
+        }
+        incomingShare(intent);
         consumeUpdateNotification(intent);
     }
     @Override protected void onResume(){
