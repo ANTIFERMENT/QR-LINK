@@ -6,6 +6,12 @@ import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
 import android.content.pm.Signature;
 import android.net.Uri;
+import android.net.ConnectivityManager;
+import android.net.Network;
+import android.net.NetworkCapabilities;
+import javax.net.ssl.SSLException;
+import java.nio.file.Files;
+import java.nio.file.StandardCopyOption;
 import android.os.Build;
 import android.provider.Settings;
 import org.json.JSONObject;
@@ -22,10 +28,12 @@ public final class UpdateManager {
     /** This is the only official OTA channel. No editable source or alternate endpoint. */
     public static final String MANIFEST_URL="https://github.com/ANTIFERMENT/QR-LINK/releases/latest/download/update.json";
     public static final String TRUSTED_CERT_SHA256="2651D90F5C57F2D4A121E2D8B0899680343DC9E87E515ED5E100FC3D62C6D626";
+    private static final long MAX_APK=512L*1024L*1024L;
     private static final String RELEASE_PREFIX="/ANTIFERMENT/QR-LINK/releases/download/";
     public static final String APK_FILE="qr_link_update.apk";
     public interface Callback {
         void status(String message);
+        default void progress(long transferred,long total){}
         void release(Release info, boolean newer);
         void downloaded(File file);
         void error(String message);
@@ -58,6 +66,36 @@ public final class UpdateManager {
         if(!"https".equalsIgnoreCase(u.getProtocol())||u.getHost()==null||u.getHost().isEmpty())
             throw new IOException("Нужна прямая HTTPS-ссылка");
     }
+    public static File apkFile(Context c){return new File(new File(c.getFilesDir(),"ota"),APK_FILE);}
+    private static void internetReady(Context c)throws IOException{
+        ConnectivityManager cm=(ConnectivityManager)c.getSystemService(Context.CONNECTIVITY_SERVICE);
+        Network network=cm==null?null:cm.getActiveNetwork();
+        NetworkCapabilities caps=network==null?null:cm.getNetworkCapabilities(network);
+        if(caps==null||!caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET))
+            throw new IOException("Нет подключения к интернету. Включите Wi-Fi или мобильные данные.");
+        try{InetAddress.getAllByName("github.com");}
+        catch(UnknownHostException e){
+            if(!caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED))
+                throw new IOException("Сеть подключена, но интернет или DNS недоступны. Проверьте Wi-Fi, мобильные данные и VPN.",e);
+            throw new IOException("Интернет есть, но DNS не находит github.com. Проверьте DNS, блокировщик и VPN.",e);
+        }
+    }
+    private static String friendly(Exception e){
+        if(e instanceof UnknownHostException)return "DNS не может определить адрес сервера GitHub. Проверьте интернет, DNS и VPN.";
+        if(e instanceof SocketTimeoutException)return "GitHub не ответил вовремя. Проверьте скорость соединения и попробуйте ещё раз.";
+        if(e instanceof SSLException)return "Ошибка защищённого соединения с GitHub. Проверьте дату, время и настройки VPN.";
+        if(e instanceof ConnectException)return "Не удалось соединиться с GitHub. Сервер или соединение недоступны.";
+        String s=e.getMessage();
+        return s==null||s.trim().isEmpty()?"Неизвестная ошибка. Повторите попытку.":s;
+    }
+    private static void requireOk(HttpsURLConnection c,String purpose)throws IOException{
+        int code=c.getResponseCode();
+        if(code==200)return;
+        if(code==404)throw new IOException("Файл обновления не найден в GitHub Releases (HTTP 404).");
+        if(code==403||code==429)throw new IOException("GitHub ограничил доступ к загрузке (HTTP "+code+"). Попробуйте позже.");
+        if(code>=500)throw new IOException("Сервер GitHub временно недоступен (HTTP "+code+").");
+        throw new IOException(purpose+": сервер ответил HTTP "+code);
+    }
     private static HttpsURLConnection connection(String url)throws IOException{
         checkHttps(url);
         URLConnection c=new URL(url).openConnection();
@@ -70,62 +108,99 @@ public final class UpdateManager {
     public static void check(Activity activity,String manifestUrl,Callback cb){
         new Thread(()->{
             try{
-                if(!MANIFEST_URL.equals(manifestUrl))throw new IOException("Нельзя сменить официальный OTA-источник");
+                if(!MANIFEST_URL.equals(manifestUrl))throw new IOException("Источник OTA изменён. Используется только официальный GitHub.");
+                activity.runOnUiThread(()->cb.status("Проверяем интернет…"));
+                internetReady(activity);
+                activity.runOnUiThread(()->cb.status("Проверяем GitHub…"));
                 HttpsURLConnection c=connection(MANIFEST_URL);
                 JSONObject json;
                 try{
-                    if(c.getResponseCode()!=200)throw new IOException("Сервер обновлений: HTTP "+c.getResponseCode());
+                    requireOk(c,"Проверка обновления");
                     ByteArrayOutputStream memory=new ByteArrayOutputStream();
                     try(InputStream in=c.getInputStream()){
                         byte[] b=new byte[8192];int n;
-                        while((n=in.read(b))!=-1){if(memory.size()+n>64*1024)throw new IOException("Слишком большой манифест");memory.write(b,0,n);}
+                        while((n=in.read(b))!=-1){
+                            if(memory.size()+n>64*1024)throw new IOException("Ответ сервера слишком большой.");
+                            memory.write(b,0,n);
+                        }
                     }
-                    json=new JSONObject(memory.toString("UTF-8"));
+                    try{json=new JSONObject(memory.toString("UTF-8"));}
+                    catch(org.json.JSONException bad){throw new IOException("GitHub вернул некорректный файл обновления.",bad);}
                 }finally{c.disconnect();}
                 Release info=new Release(json);
                 long installed=activity.getPackageManager().getPackageInfo(activity.getPackageName(),0).getLongVersionCode();
                 activity.runOnUiThread(()->cb.release(info,info.versionCode>installed));
-            }catch(Exception e){activity.runOnUiThread(()->cb.error("Проверка OTA: "+e.getMessage()));}
+            }catch(Exception e){
+                String error=friendly(e);
+                activity.runOnUiThread(()->cb.error(error));
+            }
         },"qr-link-update-check").start();
     }
     public static void download(Activity activity,Release r,Callback cb){
         new Thread(()->{
-            File temp=new File(activity.getCacheDir(),APK_FILE+".part");
-            File apk=new File(activity.getCacheDir(),APK_FILE);
+            File folder=new File(activity.getFilesDir(),"ota");
+            File temp=new File(folder,APK_FILE+".part");
+            File apk=new File(folder,APK_FILE);
             try{
-                checkHttps(r.apkUrl);
+                internetReady(activity);
+                if(!folder.isDirectory()&&!folder.mkdirs())throw new IOException("Не удалось создать папку обновлений во внутренней памяти.");
+                if(r.sizeBytes>MAX_APK)throw new IOException("Размер обновления превышает 512 МБ.");
+                if(r.sizeBytes>0&&folder.getUsableSpace()<r.sizeBytes+4L*1024*1024)
+                    throw new IOException("Недостаточно свободного места для обновления. Освободите память устройства.");
                 HttpsURLConnection c=connection(r.apkUrl);
-                long read=0;long size;
+                long received=0L;
+                long total;
                 MessageDigest digest=MessageDigest.getInstance("SHA-256");
                 try{
-                    if(c.getResponseCode()!=200)throw new IOException("Скачивание APK: HTTP "+c.getResponseCode());
-                    size=c.getContentLengthLong();
-                    if(size>512L*1024*1024)throw new IOException("APK слишком большой");
-                    if(r.sizeBytes>0 && size>0 && size!=r.sizeBytes)throw new IOException("Размер APK не соответствует манифесту");
-                    try(InputStream in=new BufferedInputStream(c.getInputStream(),256*1024);
-                        FileOutputStream out=new FileOutputStream(temp)){
-                        byte[] buf=new byte[256*1024];int n;long lastReport=0;
+                    requireOk(c,"Загрузка APK");
+                    long serverLength=c.getContentLengthLong();
+                    if(serverLength>MAX_APK)throw new IOException("Слишком большой APK.");
+                    if(r.sizeBytes>0&&serverLength>0&&serverLength!=r.sizeBytes)
+                        throw new IOException("GitHub вернул файл другого размера.");
+                    total=r.sizeBytes>0?r.sizeBytes:serverLength;
+                    final long visibleTotal=total;
+                    activity.runOnUiThread(()->cb.progress(0L,visibleTotal));
+                    try(InputStream in=new BufferedInputStream(c.getInputStream(),128*1024);
+                        FileOutputStream out=new FileOutputStream(temp,false)){
+                        byte[] buf=new byte[128*1024];
+                        int n;long lastReport=0L;
                         while((n=in.read(buf))!=-1){
-                            read+=n;if(read>512L*1024*1024)throw new IOException("Превышен предел 512 МиБ");
+                            received+=n;
+                            if(received>MAX_APK)throw new IOException("Превышен допустимый размер обновления.");
                             out.write(buf,0,n);digest.update(buf,0,n);
                             long now=System.currentTimeMillis();
-                            if(now-lastReport>400){lastReport=now;
-                                String msg="Загружено "+Util.readable(read)+(size>0?" / "+Util.readable(size):"");
-                                activity.runOnUiThread(()->cb.status(msg));
+                            if(now-lastReport>120L){
+                                lastReport=now;
+                                final long current=received;
+                                activity.runOnUiThread(()->cb.progress(current,visibleTotal));
                             }
                         }
                         out.getFD().sync();
+                    }catch(FileNotFoundException e){
+                        throw new IOException("Не удалось создать файл обновления. Проверьте свободное место.",e);
                     }
                 }finally{c.disconnect();}
-                if(r.sizeBytes>0 && read!=r.sizeBytes)throw new IOException("Скачанный APK имеет неверный размер");
+                if(r.sizeBytes>0&&received!=r.sizeBytes)
+                    throw new IOException("Файл загрузился не полностью. Повторите загрузку.");
+                final long complete=received;
+                final long full=r.sizeBytes>0?r.sizeBytes:received;
+                activity.runOnUiThread(()->{
+                    cb.progress(complete,full);
+                    cb.status("Проверяем целостность и подпись…");
+                });
                 StringBuilder hash=new StringBuilder(64);
                 for(byte b:digest.digest())hash.append(String.format(Locale.US,"%02x",b&255));
-                if(!hash.toString().equals(r.sha256))throw new IOException("SHA-256 не совпадает, APK отклонён");
-                if(apk.exists()&&!apk.delete())throw new IOException("Не удалось заменить старый APK");
-                if(!temp.renameTo(apk))throw new IOException("Не удалось сохранить APK");
-                try{verifyApk(activity,apk,r.versionCode);}catch(Exception invalid){apk.delete();throw invalid;}
+                if(!hash.toString().equals(r.sha256))throw new IOException("Контрольная сумма SHA-256 не совпала. Файл отклонён.");
+                try{Files.move(temp.toPath(),apk.toPath(),StandardCopyOption.REPLACE_EXISTING);}
+                catch(IOException move){throw new IOException("Не удалось сохранить APK во внутренней памяти. Проверьте свободное место.",move);}
+                try{verifyApk(activity,apk,r.versionCode);}
+                catch(Exception invalid){apk.delete();throw invalid;}
                 activity.runOnUiThread(()->cb.downloaded(apk));
-            }catch(Exception e){temp.delete();activity.runOnUiThread(()->cb.error("OTA: "+e.getMessage()));}
+            }catch(Exception e){
+                temp.delete();
+                final String error=friendly(e);
+                activity.runOnUiThread(()->cb.error(error));
+            }
         },"qr-link-update-download").start();
     }
     /** An archive is accepted only if Android will recognize it as THIS installed app. */
@@ -157,7 +232,7 @@ public final class UpdateManager {
     }
     public static void install(Activity a){
         try{
-            File apk=new File(a.getCacheDir(),APK_FILE);
+            File apk=apkFile(a);
             if(!apk.isFile())throw new IOException("Сначала загрузите обновление");
             PackageManager pm=a.getPackageManager();
             if(Build.VERSION.SDK_INT>=26&&!pm.canRequestPackageInstalls()){
@@ -178,8 +253,8 @@ public final class UpdateManager {
             view.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
             a.startActivity(view);
         }catch(Exception e){
-            new android.app.AlertDialog.Builder(a).setTitle("Не удалось установить").setMessage(e.getMessage())
-                .setPositiveButton("Закрыть",null).show();
+            OtaProgressDialog screen=new OtaProgressDialog(a);
+            screen.show();screen.fail(friendly(e),null);
         }
     }
 }

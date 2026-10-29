@@ -15,7 +15,7 @@ public final class ApkProvider extends ContentProvider {
     @Override public boolean onCreate(){return true;}
     private File approved(Uri uri)throws FileNotFoundException{
         if(uri==null||!"/apk".equals(uri.getPath()))throw new FileNotFoundException("Недопустимый путь");
-        File file=new File(getContext().getCacheDir(),UpdateManager.APK_FILE);
+        File file=UpdateManager.apkFile(getContext());
         if(!file.isFile())throw new FileNotFoundException("Обновление не загружено");
         return file;
     }

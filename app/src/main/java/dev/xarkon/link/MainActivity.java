@@ -21,7 +21,7 @@ import com.google.zxing.common.BitMatrix;
 import java.lang.ref.WeakReference;
 import java.util.*;
 
-/** QR LINK 0.3.10: single-file transfer dashboard, OTA updater, Wi-Fi Direct. */
+/** QR LINK 0.3.11: AMOLED OTA window and Russian network diagnostics. */
 public final class MainActivity extends Activity {
     private static final int FILES=41,FOLDER=42,SCAN=43,CAMERA_PERMISSION=44,WIFI_PERMISSION=45,WIFI_SEND_PERMISSION=46;
     private static final int HOME=0,SEND=1,RECEIVE=2,SETTINGS=3,HISTORY=4,FTP=5;
@@ -665,100 +665,87 @@ public final class MainActivity extends Activity {
         outlineButton(utilities,"wifi","Настройки Wi-Fi",()->{
             try{startActivity(new Intent(Settings.ACTION_WIFI_SETTINGS));}catch(Exception e){toast(e.getMessage());}
         });
-        LinearLayout updater=section("updates","Обновления приложения",
-            "Проверка, загрузка и установка APK через HTTPS","receive",false);
-        outlineButton(updater,"check","Обновить QR LINK",this::checkForUpdates);
-        updater.addView(text("Официальный канал: ANTIFERMENT/QR-LINK · GitHub Releases",12,muted,false));
-        updater.addView(text("Постоянная подпись релизов · SHA-256 · HTTPS",12,muted,false));
-        outlineButton(updater,"file","Установить загруженное обновление",()->UpdateManager.install(this));
-        updater.addView(text("При установке Android запросит подтверждение. Обновление должно иметь ту же цифровую подпись, что и установленная версия.",12,muted,false));
+        LinearLayout updater=section("updates","Обновления",
+            "QR LINK · новая версия","receive",false);
+        outlineButton(updater,"check","Проверить обновление",this::checkForUpdates);
         LinearLayout about=section("about","Информация и безопасность","Версия, протокол, хранение файлов","info",false);
-        about.addView(text("QR LINK 0.3.9",16,fg,true));space(about,9);
+        about.addView(text("QR LINK "+getAppVersion(),16,fg,true));space(about,9);
         about.addView(text("Android 10+  ·  Wi-Fi / Wi-Fi Direct  ·  соединение по QR",13,muted,false));space(about,13);
         about.addView(text("Данные передаются по HTTP без шифрования. Случайный ключ QR защищает от случайного подключения, но не скрывает содержимое передачи. Используйте доверенную локальную сеть.",13,fg,false));
         space(about,11);
         about.addView(text("Режим ShareMe FTP и Android «Поделиться» доступны отдельно. Нативные протоколы SHAREit и ShareMe не эмулируются.",12,muted,false));
         space(about,8);
     }
+    private String getAppVersion(){
+        try{return getPackageManager().getPackageInfo(getPackageName(),0).versionName;}
+        catch(Exception e){return "—";}
+    }
     private void checkOtaQuietly(){
         if(isFinishing()||isDestroyed())return;
         long now=System.currentTimeMillis();
         long last=prefs().getLong("ota_last_auto_check",0L);
-        if(last>0L && now>=last && now-last<24L*60L*60L*1000L)return;
+        if(last>0L&&now>=last&&now-last<24L*60L*60L*1000L)return;
         prefs().edit().putLong("ota_last_auto_check",now).apply();
         UpdateManager.check(this,UpdateManager.MANIFEST_URL,new UpdateManager.Callback(){
             @Override public void status(String message){}
             @Override public void release(UpdateManager.Release r,boolean newer){
                 if(!newer||isFinishing()||isDestroyed())return;
-                new AlertDialog.Builder(MainActivity.this)
-                    .setTitle("QR LINK " + r.versionName + " доступен")
-                    .setMessage((r.notes.isEmpty()?"Выпущено новое обновление.":r.notes)+
-                        "\n\nПроверенная версия с официального GitHub.")
-                    .setNegativeButton("Позже",null)
-                    .setPositiveButton("Обновить",(d,w)->downloadAndInstallUpdate(r)).show();
+                OtaProgressDialog offer=new OtaProgressDialog(MainActivity.this);
+                offer.show();offer.offer(r.versionName,()->downloadAndInstallUpdate(r,offer));
             }
             @Override public void downloaded(java.io.File file){}
-            @Override public void error(String error){}
+            @Override public void error(String message){}
         });
     }
-    /** One tap inside QR LINK: check, download, verify and open Android installer. */
+    /** One-tap secure OTA, with a single themed dialog through all stages. */
     private void checkForUpdates(){
-        final AlertDialog progress=new AlertDialog.Builder(this)
-            .setTitle("QR LINK · OTA")
-            .setMessage("Проверяем новую версию…")
-            .setNegativeButton("Скрыть",null).create();
-        progress.show();
+        if(isFinishing()||isDestroyed())return;
+        OtaProgressDialog ui=new OtaProgressDialog(this);
+        ui.show();
+        beginUpdateCheck(ui);
+    }
+    private void beginUpdateCheck(OtaProgressDialog ui){
+        ui.stage("Проверяем подключение…","Интернет и доступность GitHub");
         UpdateManager.check(this,UpdateManager.MANIFEST_URL,new UpdateManager.Callback(){
             @Override public void status(String message){
-                if(progress.isShowing())progress.setMessage(message);
+                if(!isFinishing()&&!isDestroyed())ui.stage(message,"Интернет и сервер обновлений");
             }
             @Override public void release(UpdateManager.Release r,boolean newer){
-                progress.dismiss();
-                if(newer){
-                    downloadAndInstallUpdate(r);
-                }else{
-                    new AlertDialog.Builder(MainActivity.this)
-                        .setTitle("Актуальная версия")
-                        .setMessage("QR LINK уже обновлён. Установлена версия "+r.versionName)
-                        .setPositiveButton("Понятно",null).show();
-                }
+                if(isFinishing()||isDestroyed())return;
+                if(newer)downloadAndInstallUpdate(r,ui);
+                else ui.current("Версия "+getAppVersion());
             }
             @Override public void downloaded(java.io.File file){}
             @Override public void error(String message){
-                progress.dismiss();
-                new AlertDialog.Builder(MainActivity.this)
-                    .setTitle("Проверка обновлений")
-                    .setMessage(message)
-                    .setPositiveButton("Закрыть",null).show();
+                if(isFinishing()||isDestroyed())return;
+                ui.fail(message,()->beginUpdateCheck(ui));
             }
         });
     }
     private void downloadAndInstallUpdate(UpdateManager.Release r){
         if(isFinishing()||isDestroyed())return;
-        final AlertDialog progress=new AlertDialog.Builder(this)
-            .setTitle("QR LINK "+r.versionName)
-            .setMessage("Загружаем и проверяем обновление…")
-            .setNegativeButton("Скрыть",null).create();
-        progress.show();
+        OtaProgressDialog ui=new OtaProgressDialog(this);
+        ui.show();downloadAndInstallUpdate(r,ui);
+    }
+    private void downloadAndInstallUpdate(UpdateManager.Release r,OtaProgressDialog ui){
+        ui.stage("Подготавливаем загрузку…","QR LINK "+r.versionName);
         UpdateManager.download(this,r,new UpdateManager.Callback(){
             @Override public void status(String message){
-                if(progress.isShowing())progress.setMessage(message);
+                if(!isFinishing()&&!isDestroyed())
+                    ui.stage(message,"Проверяем безопасность обновления");
+            }
+            @Override public void progress(long bytes,long total){
+                if(!isFinishing()&&!isDestroyed())ui.downloading(bytes,total);
             }
             @Override public void release(UpdateManager.Release ignore,boolean newer){}
             @Override public void downloaded(java.io.File file){
-                progress.dismiss();
-                if(!isFinishing()&&!isDestroyed()){
-                    UpdateManager.install(MainActivity.this);
-                }
+                if(isFinishing()||isDestroyed())return;
+                ui.dismiss();
+                UpdateManager.install(MainActivity.this);
             }
             @Override public void error(String message){
-                progress.dismiss();
-                if(!isFinishing()&&!isDestroyed()){
-                    new AlertDialog.Builder(MainActivity.this)
-                        .setTitle("Обновление не установлено")
-                        .setMessage(message)
-                        .setPositiveButton("Закрыть",null).show();
-                }
+                if(isFinishing()||isDestroyed())return;
+                ui.fail(message,()->downloadAndInstallUpdate(r,ui));
             }
         });
     }
