@@ -15,19 +15,30 @@ public final class BackgroundUpdateJob extends JobService {
         SharedPreferences prefs=getSharedPreferences("settings",0);
         if(!prefs.getBoolean(OtaUpdateSchedule.PREF_BACKGROUND,false))return false;
         worker=new Thread(()->{
+            prefs.edit().putLong("ota_last_background_attempt",System.currentTimeMillis())
+                .putString("ota_background_result","Проверка соединения...").apply();
             try{
                 UpdateManager.Release release=UpdateManager.fetchLatest(getApplicationContext());
                 long installed=getPackageManager().getPackageInfo(getPackageName(),0).getLongVersionCode();
-                prefs.edit().putLong("ota_last_background_check",System.currentTimeMillis()).apply();
+                prefs.edit().putLong("ota_last_background_check",System.currentTimeMillis())
+                    .putString("ota_background_result",release.versionCode>installed
+                        ?"Доступна версия "+release.versionName:"Установлена актуальная версия")
+                    .apply();
                 if(release.versionCode>installed){
                     prefs.edit().putLong(OtaUpdateSchedule.PREF_AVAILABLE_CODE,release.versionCode)
                         .putString(OtaUpdateSchedule.PREF_AVAILABLE_NAME,release.versionName).apply();
                     long previous=prefs.getLong("ota_last_notified_code",0L);
-                    if(release.versionCode>previous&&notifyUpdate(release.versionName))
-                        prefs.edit().putLong("ota_last_notified_code",release.versionCode).apply();
+                    if(release.versionCode>previous){
+                        if(notifyUpdate(release.versionName))
+                            prefs.edit().putLong("ota_last_notified_code",release.versionCode).apply();
+                        else prefs.edit().putString("ota_background_result",
+                            "Обновление найдено, но уведомления отключены").apply();
+                    }
                 }
-            }catch(Exception ignored){
-                // System schedules the next network-constrained check automatically.
+            }catch(Exception error){
+                String message=error.getMessage();
+                if(message==null||message.trim().isEmpty())message="Ошибка соединения";
+                prefs.edit().putString("ota_background_result",message).apply();
             }finally{jobFinished(params,false);}
         },"qr-link-background-ota");
         worker.start();

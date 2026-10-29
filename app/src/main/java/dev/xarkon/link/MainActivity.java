@@ -21,7 +21,7 @@ import com.google.zxing.common.BitMatrix;
 import java.lang.ref.WeakReference;
 import java.util.*;
 
-/** QR LINK 0.3.12: safe system insets, seamless screens and 512 MiB benchmark. */
+/** QR LINK 0.3.15: dependable OTA launch, schedule visibility and correct launcher. */
 public final class MainActivity extends Activity {
     private static final int FILES=41,FOLDER=42,SCAN=43,CAMERA_PERMISSION=44,WIFI_PERMISSION=45,WIFI_SEND_PERMISSION=46;
     private static final int HOME=0,SEND=1,RECEIVE=2,SETTINGS=3,HISTORY=4,FTP=5;
@@ -55,6 +55,11 @@ public final class MainActivity extends Activity {
     private int statusShieldHeight;
     private boolean screenTransition;
     private int screenDirection=1;
+    private boolean updateNotificationLaunch;
+    private TextView backgroundCheckStatus;
+    private final Runnable startupUpdateTask=()->{
+        if(!isFinishing()&&!isDestroyed())checkOtaQuietly();
+    };
     private LinearLayout content,root;
     private TextView status,progressText,queueLabel,pairLabel,receiveHint,receiveCaption,networkBadge;
     private TextView transferName,transferPercent,transferSize,transferRate;
@@ -193,9 +198,7 @@ public final class MainActivity extends Activity {
         }
         incomingShare(getIntent());
         OtaUpdateSchedule.configure(this);
-        if(prefs().getBoolean(OtaUpdateSchedule.PREF_ON_LAUNCH,true))
-            handler.postDelayed(this::checkOtaQuietly,2400L);
-        else handler.postDelayed(this::offerStoredBackgroundUpdate,1300L);
+        consumeUpdateNotification(getIntent());
     }
     @Override protected void onSaveInstanceState(Bundle state){
         state.putInt("page",page);
@@ -203,10 +206,22 @@ public final class MainActivity extends Activity {
         state.putInt("scroll_y",scroller==null?0:scroller.getScrollY());
         super.onSaveInstanceState(state);
     }
-    @Override protected void onNewIntent(Intent intent){super.onNewIntent(intent);setIntent(intent);incomingShare(intent);}
+    @Override protected void onNewIntent(Intent intent){
+        super.onNewIntent(intent);setIntent(intent);incomingShare(intent);
+        consumeUpdateNotification(intent);
+    }
     @Override protected void onResume(){
         super.onResume();current=new WeakReference<>(this);
         handler.removeCallbacks(ticker);if(!emergency)handler.post(ticker);
+        updateBackgroundCheckStatus();
+        handler.removeCallbacks(startupUpdateTask);
+        if(updateNotificationLaunch){
+            updateNotificationLaunch=false;
+        }else if(prefs().getBoolean(OtaUpdateSchedule.PREF_ON_LAUNCH,true)){
+            handler.postDelayed(startupUpdateTask,1600L);
+        }else{
+            handler.postDelayed(this::offerStoredBackgroundUpdate,700L);
+        }
         if(resumeReceiveAfterWifi&&page==RECEIVE){
             android.net.wifi.WifiManager wifi=(android.net.wifi.WifiManager)getApplicationContext().getSystemService(WIFI_SERVICE);
             if(wifi!=null&&wifi.isWifiEnabled()){
@@ -215,7 +230,11 @@ public final class MainActivity extends Activity {
             }
         }
     }
-    @Override protected void onPause(){handler.removeCallbacks(ticker);super.onPause();}
+    @Override protected void onPause(){
+        handler.removeCallbacks(ticker);
+        handler.removeCallbacks(startupUpdateTask);
+        super.onPause();
+    }
     @Override protected void onDestroy(){if(current.get()==this)current.clear();super.onDestroy();}
     @Override public void onBackPressed(){if(page==HOME){super.onBackPressed();}else if(page==HISTORY||page==FTP){navigate(SETTINGS);}else navigate(HOME);}
     private GradientDrawable shape(int color,int line,int round){GradientDrawable d=new GradientDrawable();d.setColor(color);d.setCornerRadius(dp(round));if(line!=0)d.setStroke(dp(1),line);return d;}
@@ -472,6 +491,7 @@ public final class MainActivity extends Activity {
     private void renderScreen(){
         theme();lastQr="";status=null;progress=null;progressText=null;transferName=null;transferPercent=null;transferSize=null;transferRate=null;pairLabel=null;queueLabel=null;
         qrImage=null;receiveHint=null;receiveCaption=null;networkBadge=null;
+        backgroundCheckStatus=null;
         scroller=new ScrollView(this);scroller.setFillViewport(true);scroller.setClipToPadding(false);
         scroller.setBackgroundColor(bg);scroller.setVerticalScrollBarEnabled(false);
         // Keep the window background identical to the screen during navigation and
@@ -811,6 +831,7 @@ public final class MainActivity extends Activity {
             prefs().getBoolean(OtaUpdateSchedule.PREF_BACKGROUND,false),enabled->{
                 prefs().edit().putBoolean(OtaUpdateSchedule.PREF_BACKGROUND,enabled).apply();
                 OtaUpdateSchedule.configure(this);
+                updateBackgroundCheckStatus();
                 frequency.animate().cancel();
                 frequency.animate().alpha(enabled?1f:.45f)
                     .setDuration(175).setInterpolator(new DecelerateInterpolator()).start();
@@ -869,6 +890,10 @@ public final class MainActivity extends Activity {
         boolean enabled=prefs().getBoolean(OtaUpdateSchedule.PREF_BACKGROUND,false);
         frequency.setAlpha(enabled?1f:.45f);
         setEnabledChildren(frequency,enabled);
+        backgroundCheckStatus=text("",12,muted,false);
+        backgroundCheckStatus.setPadding(dp(7),dp(7),dp(7),dp(10));
+        margin(parent,backgroundCheckStatus,5);
+        updateBackgroundCheckStatus();
     }
     private void setEnabledChildren(View v,boolean enabled){
         v.setEnabled(enabled);
@@ -882,17 +907,48 @@ public final class MainActivity extends Activity {
         try{return getPackageManager().getPackageInfo(getPackageName(),0).versionName;}
         catch(Exception e){return "—";}
     }
+    private void consumeUpdateNotification(Intent intent){
+        if(intent==null||!intent.getBooleanExtra("ota_open_from_notification",false))return;
+        intent.removeExtra("ota_open_from_notification");
+        updateNotificationLaunch=true;
+        handler.postDelayed(()->{
+            if(!isFinishing()&&!isDestroyed())checkForUpdates();
+        },380L);
+    }
+    private void updateBackgroundCheckStatus(){
+        if(backgroundCheckStatus==null)return;
+        if(!prefs().getBoolean(OtaUpdateSchedule.PREF_BACKGROUND,false)){
+            backgroundCheckStatus.setText("Фоновая проверка выключена");
+            return;
+        }
+        String result=prefs().getString("ota_background_result","");
+        long last=prefs().getLong("ota_last_background_attempt",0L);
+        String lastText=last>0?android.text.format.DateFormat.format("dd.MM HH:mm",last).toString():"ещё не выполнялась";
+        if(android.os.Build.VERSION.SDK_INT>=33&&
+            checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS)!=
+                PackageManager.PERMISSION_GRANTED){
+            backgroundCheckStatus.setText("Последняя проверка: "+lastText+
+                "\nУведомления запрещены в настройках Android");
+        }else if(!result.isEmpty()){
+            backgroundCheckStatus.setText("Последняя проверка: "+lastText+"\n"+result);
+        }else{
+            backgroundCheckStatus.setText("Ожидается первая проверка по расписанию");
+        }
+    }
     private void checkOtaQuietly(){
         if(isFinishing()||isDestroyed()||
             !prefs().getBoolean(OtaUpdateSchedule.PREF_ON_LAUNCH,true))return;
         long now=System.currentTimeMillis();
         long last=prefs().getLong("ota_last_startup_check",0L);
-        if(last>0L&&now>=last&&now-last<5L*60L*1000L)return;
+        if(last>0L&&now>=last&&now-last<60L*1000L)return;
         prefs().edit().putLong("ota_last_startup_check",now).apply();
         UpdateManager.check(this,UpdateManager.MANIFEST_URL,new UpdateManager.Callback(){
             @Override public void status(String message){}
             @Override public void release(UpdateManager.Release r,boolean newer){
-                if(!newer||isFinishing()||isDestroyed())return;
+                if(isFinishing()||isDestroyed())return;
+                if(!newer){offerStoredBackgroundUpdate();return;}
+                prefs().edit().putLong(OtaUpdateSchedule.PREF_AVAILABLE_CODE,r.versionCode)
+                    .putString(OtaUpdateSchedule.PREF_AVAILABLE_NAME,r.versionName).apply();
                 OtaProgressDialog offer=new OtaProgressDialog(MainActivity.this);
                 offer.show();offer.offer(r.versionName,()->downloadAndInstallUpdate(r,offer));
             }

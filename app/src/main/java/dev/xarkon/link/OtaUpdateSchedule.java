@@ -17,12 +17,15 @@ public final class OtaUpdateSchedule {
         "Каждые 12 часов","Каждые 24 часа","Каждые 3 дня","Каждые 7 дней"
     };
     private static final int JOB_ID=0x514C1301;
+    private static final int INITIAL_JOB_ID=0x514C1302;
     public static void configure(Context context){
         Context app=context.getApplicationContext();
         SharedPreferences p=app.getSharedPreferences("settings",0);
         JobScheduler scheduler=(JobScheduler)app.getSystemService(Context.JOB_SCHEDULER_SERVICE);
         if(scheduler==null)return;
-        if(!p.getBoolean(PREF_BACKGROUND,false)){scheduler.cancel(JOB_ID);return;}
+        if(!p.getBoolean(PREF_BACKGROUND,false)){
+            scheduler.cancel(JOB_ID);scheduler.cancel(INITIAL_JOB_ID);return;
+        }
         long hours=p.getLong(PREF_FREQUENCY,24L);
         boolean valid=false;
         for(long allowed:INTERVAL_HOURS)if(hours==allowed)valid=true;
@@ -35,6 +38,19 @@ public final class OtaUpdateSchedule {
             .setPersisted(true)
             .setPeriodic(interval,Math.min(interval/4L,30L*60L*1000L))
             .build();
-        scheduler.schedule(info);
+        if(scheduler.schedule(info)==JobScheduler.RESULT_SUCCESS){
+            // A newly enabled schedule should not wait an entire day/week before
+            // its first network check. Let Android dispatch this one-time job soon.
+            JobInfo once=new JobInfo.Builder(INITIAL_JOB_ID,
+                new ComponentName(app,BackgroundUpdateJob.class))
+                .setRequiredNetworkType(JobInfo.NETWORK_TYPE_ANY)
+                .setMinimumLatency(15000L)
+                .setOverrideDeadline(4L*60L*1000L)
+                .build();
+            scheduler.schedule(once);
+        }else{
+            p.edit().putString("ota_background_result",
+                "Не удалось запланировать фоновую проверку").apply();
+        }
     }
 }

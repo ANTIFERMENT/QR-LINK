@@ -28,11 +28,12 @@ public final class OtaProgressDialog {
     private final Activity activity;
     private final Dialog dialog;
     private final TextView heading, label, details, bytes, percent, primary, secondary;
-    private final View mark;
+    private final CenteredRing mark;
     private final ProgressBar bar;
     private final int accent, foreground, muted, panel;
     private final boolean animate;
-    private ValueAnimator numberAnim, spin;
+    private ValueAnimator numberAnim, spin, sweepAnim;
+    private boolean spinning;
     private long lastBytes, lastTotal;
     private boolean shown;
 
@@ -41,7 +42,10 @@ public final class OtaProgressDialog {
         private final Paint paint=new Paint(Paint.ANTI_ALIAS_FLAG);
         private final RectF bounds=new RectF();
         private final int color;
+        private float sweep=360f;
         CenteredRing(Context context,int tint){super(context);color=tint;}
+        float getSweep(){return sweep;}
+        void setSweep(float value){sweep=value;invalidate();}
         @Override protected void onDraw(Canvas canvas){
             super.onDraw(canvas);
             float density=getResources().getDisplayMetrics().density;
@@ -56,7 +60,7 @@ public final class OtaProgressDialog {
             canvas.drawCircle(cx,cy,radius,paint);
             paint.setColor(color);
             bounds.set(cx-radius,cy-radius,cx+radius,cy+radius);
-            canvas.drawArc(bounds,-90f,270f,false,paint);
+            canvas.drawArc(bounds,-90f,sweep,false,paint);
         }
     }
     private int dp(float x){ return (int)(activity.getResources().getDisplayMetrics().density*x+.5f); }
@@ -132,6 +136,8 @@ public final class OtaProgressDialog {
         dialog.setOnDismissListener(ignore->{
             if(numberAnim!=null)numberAnim.cancel();
             if(spin!=null)spin.cancel();
+            if(sweepAnim!=null)sweepAnim.cancel();
+            mark.animate().cancel();
             shown=false;
         });
     }
@@ -152,20 +158,37 @@ public final class OtaProgressDialog {
     public boolean isShowing(){return shown&&dialog.isShowing();}
     public void dismiss(){if(dialog.isShowing())dialog.dismiss();}
     private void rotating(boolean enabled){
+        if(spinning==enabled)return;
+        spinning=enabled;
+        if(sweepAnim!=null){sweepAnim.cancel();sweepAnim=null;}
+        float desired=enabled?270f:360f;
+        if(animate){
+            sweepAnim=ValueAnimator.ofFloat(mark.getSweep(),desired);
+            sweepAnim.setDuration(260L);
+            sweepAnim.setInterpolator(new DecelerateInterpolator(1.4f));
+            sweepAnim.addUpdateListener(v->mark.setSweep((float)v.getAnimatedValue()));
+            sweepAnim.start();
+        }else mark.setSweep(desired);
         if(enabled){
-            // Progress events arrive every few milliseconds. Keep one animator alive
-            // instead of restarting it (which made the icon shake and stop).
-            if(spin!=null&&spin.isRunning())return;
-            mark.setRotation(0f);
-            spin=ValueAnimator.ofFloat(0f,360f);
-            spin.setDuration(1100L);
-            spin.setInterpolator(new LinearInterpolator());
-            spin.setRepeatCount(ValueAnimator.INFINITE);
-            spin.addUpdateListener(v->mark.setRotation((float)v.getAnimatedValue()));
-            spin.start();
-        }else{
+            mark.animate().cancel();
             if(spin!=null){spin.cancel();spin=null;}
             mark.setRotation(0f);
+            if(animate){
+                spin=ValueAnimator.ofFloat(0f,360f);
+                spin.setDuration(1100L);
+                spin.setInterpolator(new LinearInterpolator());
+                spin.setRepeatCount(ValueAnimator.INFINITE);
+                spin.addUpdateListener(v->mark.setRotation((float)v.getAnimatedValue()));
+                spin.start();
+            }
+        }else{
+            if(spin!=null){spin.cancel();spin=null;}
+            mark.animate().cancel();
+            if(animate){
+                mark.animate().rotation(360f).setDuration(260L)
+                    .setInterpolator(new DecelerateInterpolator(1.2f))
+                    .withEndAction(()->mark.setRotation(0f)).start();
+            }else mark.setRotation(0f);
         }
     }
     public void stage(String step,String hint){
