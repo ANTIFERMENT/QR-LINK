@@ -36,6 +36,22 @@ class OtaToolsTests(unittest.TestCase):
             self.assertIn("/v0.3.9/QR-LINK.apk", manifest["apkUrl"])
             self.assertIn("tag=v0.3.9", output.read_text())
 
+    def test_versioned_archive_name_is_detected(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            (base / "scripts").mkdir()
+            (base / "scripts/import_source_zip.py").write_bytes(
+                (ROOT / "scripts/import_source_zip.py").read_bytes())
+            with zipfile.ZipFile(base / "QR_LINK_v0.3.9_FIXED_OTA_CodeOnTheGo.zip", "w") as z:
+                root = "QR_LINK_Project/"
+                z.writestr(root + "settings.gradle", "include ':app'\\n")
+                z.writestr(root + "app/build.gradle",
+                           "android { namespace 'dev.xarkon.link' }\\n")
+                z.writestr(root + "app/src/main/AndroidManifest.xml",
+                           '<manifest xmlns:android="http://schemas.android.com/apk/res/android"><application/></manifest>')
+            subprocess.run([sys.executable, "scripts/import_source_zip.py"], cwd=base, check=True)
+            self.assertTrue((base / "app/build.gradle").is_file())
+
     def test_import_zip_and_integrate_engine(self):
         with tempfile.TemporaryDirectory() as td:
             base = Path(td)
