@@ -5,6 +5,7 @@ on:
   push:
     branches: [main]
     paths:
+      - '.github/workflows/ota-release.yml'
       - 'QR_LINK_SOURCE.zip'
       - 'QR_LINK_v*.zip'
       - 'scripts/import_source_zip.py'
@@ -45,6 +46,25 @@ jobs:
           set -euo pipefail
           test -d app || { echo "::error::app/ is missing. Upload QR LINK Android sources first."; exit 1; }
           test -f settings.gradle -o -f settings.gradle.kts || { echo "::error::settings.gradle(.kts) is missing"; exit 1; }
+
+      - name: Keep source files in GitHub for direct future edits
+        shell: bash
+        run: |
+          set -euo pipefail
+          if git ls-files --error-unmatch app/src/main/AndroidManifest.xml >/dev/null 2>&1; then
+            echo "Android source is already tracked. Ready for direct GitHub edits."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -- app/src/main app/build.gradle build.gradle settings.gradle gradle.properties
+          if git diff --cached --quiet; then
+            echo "Nothing to promote"
+            exit 0
+          fi
+          git commit -m "chore: track QR LINK Android source directly in GitHub"
+          git push origin HEAD:main
+          echo "Android source is now version-controlled in this repository."
 
       - name: Java 17
         uses: actions/setup-java@v4
