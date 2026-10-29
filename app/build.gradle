@@ -1,0 +1,24 @@
+plugins { id 'com.android.application' }
+
+android {
+    namespace = 'dev.xarkon.link'
+    compileSdk = 35
+    defaultConfig {
+        applicationId = 'dev.xarkon.link'
+        minSdk = 29
+        targetSdk = 35
+        versionCode = 14
+        versionName = '0.3.9'
+    }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+    buildTypes {
+        release { minifyEnabled = false }
+    }
+
+}
+
+// ZXing core is Java-only: QR encoding and decoding run entirely on-device.
+dependencies { implementation 'com.google.zxing:core:3.5.4' }

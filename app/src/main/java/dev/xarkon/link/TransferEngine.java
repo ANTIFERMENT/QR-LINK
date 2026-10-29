@@ -1,0 +1,387 @@
+package dev.xarkon.link;
+
+import android.content.*;
+import android.net.Uri;
+import android.os.ParcelFileDescriptor;
+import android.os.Environment;
+import android.provider.MediaStore;
+import android.util.Base64;
+import org.json.JSONObject;
+import java.io.*;
+import java.net.*;
+import java.nio.*;
+import java.nio.channels.FileChannel;
+import java.nio.charset.StandardCharsets;
+import java.util.*;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.*;
+
+public final class TransferEngine {
+    public interface Events { void note(String s); void progress(String s,long current,long total,double speed); }
+    private final Context context;
+    private final Events events;
+    private final ExecutorService handlers=Executors.newFixedThreadPool(12);
+    private final ConcurrentHashMap<String,Incoming> incoming=new ConcurrentHashMap<>();
+    private static final class BadPin {
+        long first, lockedUntil;
+        int count;
+    }
+    private final ConcurrentHashMap<String,BadPin> lastBadPin=new ConcurrentHashMap<>();
+    private volatile boolean alive;
+    private volatile String sessionKey="";
+    private ServerSocket socket;
+    private DatagramSocket discovery;
+    private Thread acceptThread,discoverThread;
+    private static final String SESSIONS="incoming_sessions";
+    private static final String BASE=Environment.DIRECTORY_DOWNLOADS+"/QR LINK/";
+    public TransferEngine(Context c,Events e){context=c.getApplicationContext();events=e;restore();}
+    public boolean receiving(){return alive;}
+    public String key(){return sessionKey;}
+    public synchronized void start(String chosenKey)throws Exception{
+        if(alive)return;
+        sessionKey=chosenKey;
+        socket=new ServerSocket();socket.setReuseAddress(true);
+        socket.bind(new InetSocketAddress(Util.PORT),32);
+        alive=true;
+        acceptThread=new Thread(()->{
+            while(alive)try{
+                Socket s=socket.accept();s.setSoTimeout(90000);s.setTcpNoDelay(true);s.setReceiveBufferSize(1024*1024);
+                handlers.execute(()->serve(s));
+            }catch(Exception ex){if(alive)events.note("Сервер: "+ex.getMessage());}
+        },"xarkon-accept");acceptThread.start();
+        discoverThread=new Thread(this::discoveryLoop,"xarkon-discovery");discoverThread.start();
+        events.note("Приём включён, порт "+Util.PORT);
+    }
+    public synchronized void stop(){
+        alive=false;sessionKey="";try{if(socket!=null)socket.close();}catch(Exception ignored){}
+        if(discovery!=null)discovery.close();
+    }
+    public void shutdown(){stop();handlers.shutdownNow();}
+    private void discoveryLoop(){
+        try(DatagramSocket ds=new DatagramSocket(null)){
+            discovery=ds;ds.setReuseAddress(true);ds.bind(new InetSocketAddress(Util.DISCOVERY_PORT));
+            ds.setSoTimeout(2500);byte[]buf=new byte[1024];
+            while(alive){
+                try{
+                    DatagramPacket p=new DatagramPacket(buf,buf.length);ds.receive(p);
+                    String msg=new String(p.getData(),p.getOffset(),p.getLength(),StandardCharsets.UTF_8);
+                    if(msg.equals("XARKON_DISCOVER_1")){
+                        String response="XARKON_LINK_1|"+android.os.Build.MANUFACTURER+" "+android.os.Build.MODEL+"|"+Util.PORT;
+                        byte[] data=response.getBytes(StandardCharsets.UTF_8);
+                        ds.send(new DatagramPacket(data,data.length,p.getAddress(),p.getPort()));
+                    }
+                }catch(SocketTimeoutException ignored){}
+            }
+        }catch(Exception e){if(alive)events.note("Поиск устройств: "+e.getMessage());}
+    }
+    private static String line(InputStream in)throws IOException{
+        ByteArrayOutputStream b=new ByteArrayOutputStream();int x;
+        while((x=in.read())!=-1){if(x=='\n')break;if(x!='\r')b.write(x);if(b.size()>8192)throw new IOException("Заголовок слишком длинный");}
+        if(x==-1&&b.size()==0)return null;
+        return b.toString(StandardCharsets.ISO_8859_1.name());
+    }
+    private static void reply(OutputStream out,int code,String text,JSONObject j)throws IOException{
+        byte[] body=j.toString().getBytes(StandardCharsets.UTF_8);
+        String header="HTTP/1.1 "+code+" "+text+"\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: "+body.length+"\r\nConnection: close\r\n\r\n";
+        out.write(header.getBytes(StandardCharsets.US_ASCII));out.write(body);out.flush();
+    }
+    private static JSONObject error(String why){JSONObject j=new JSONObject();try{j.put("error",why);}catch(Exception ignored){}return j;}
+    private void serve(Socket sock){
+        try(Socket s=sock; InputStream in=new BufferedInputStream(s.getInputStream(),256*1024);
+               OutputStream out=new BufferedOutputStream(s.getOutputStream(),32*1024)){
+            String first=line(in);if(first==null)return;
+            String[]pieces=first.split(" ");
+            if(pieces.length!=3){reply(out,400,"Bad Request",error("bad request"));return;}
+            Map<String,String>heads=new HashMap<>();String ln;
+            int num=0;
+            while((ln=line(in))!=null&&!ln.isEmpty()){
+                if(++num>40)throw new IOException("Слишком много заголовков");
+                int at=ln.indexOf(':');if(at>0)heads.put(ln.substring(0,at).trim().toLowerCase(Locale.US),ln.substring(at+1).trim());
+            }
+            String from=s.getInetAddress().getHostAddress();
+            BadPin block=lastBadPin.computeIfAbsent(from,k->new BadPin());
+            synchronized(block){
+                long now=System.currentTimeMillis();
+                if(now<block.lockedUntil){reply(out,429,"Try Later",error("Слишком много попыток подключения"));return;}
+                if(!sessionKey.equals(heads.get("x-xarkon-key"))){
+                    if(now-block.first>60000){block.first=now;block.count=0;}
+                    if(++block.count>=5)block.lockedUntil=now+60000;
+                    reply(out,403,"Forbidden",error("Неверный ключ сеанса"));return;
+                }
+                block.count=0;block.lockedUntil=0;
+            }
+            String path=pieces[1];String method=pieces[0];
+            if(method.equals("GET")&&path.equals("/hello")){
+                reply(out,200,"OK",new JSONObject().put("app","XARKON LINK").put("version",1));return;
+            }
+            long contentLength;
+            try{contentLength=Long.parseLong(heads.getOrDefault("content-length","-1"));}
+            catch(Exception e){reply(out,411,"Length Required",error("Нужен Content-Length"));return;}
+            if(method.equals("POST")&&path.equals("/offer")){
+                if(contentLength<2||contentLength>16384){reply(out,413,"Too Large",error("Неверный размер предложения"));return;}
+                byte[]data=new byte[(int)contentLength];readFully(in,data);
+                JSONObject offer=new JSONObject(new String(data,StandardCharsets.UTF_8));
+                try{JSONObject result=offer(offer);reply(out,200,"OK",result);}
+                catch(Exception e){reply(out,400,"Bad Request",error(e.getMessage()));}
+                return;
+            }
+            if(method.equals("PUT")&&path.startsWith("/chunk/")){
+                String[]segments=path.split("/");
+                if(segments.length!=4){reply(out,404,"Not Found",error("Wrong path"));return;}
+                Incoming inc=incoming.get(segments[2]);
+                int index=Integer.parseInt(segments[3]);
+                if(inc==null){reply(out,404,"Not Found",error("Сначала отправьте /offer"));return;}
+                if(index<0||index>=inc.count){reply(out,400,"Bad Request",error("Индекс блока"));return;}
+                long start=(long)index*Util.CHUNK;
+                long expected=Math.min(Util.CHUNK,inc.size-start);
+                if(contentLength!=expected){reply(out,400,"Bad Request",error("Неверная длина блока"));return;}
+                synchronized(inc){
+                    if(inc.done.get(index)){reply(out,200,"OK",new JSONObject().put("already",true));return;}
+                    if(inc.writing.get(index)){reply(out,409,"Conflict",error("Блок уже загружается"));return;}
+                    inc.writing.set(index);
+                }
+                try {
+                try(ParcelFileDescriptor pfd=context.getContentResolver().openFileDescriptor(inc.uri,"rw")){
+                    if(pfd==null)throw new IOException("Cannot open destination");
+                    try(FileOutputStream fos=new FileOutputStream(pfd.getFileDescriptor());FileChannel channel=fos.getChannel()){
+                        byte[] buffer=new byte[256*1024];long count=0;
+                        while(count<contentLength){
+                            int n=in.read(buffer,0,(int)Math.min(buffer.length,contentLength-count));
+                            if(n<0)throw new EOFException("Соединение оборвалось");
+                            ByteBuffer bb=ByteBuffer.wrap(buffer,0,n);
+                            while(bb.hasRemaining()){
+                                int w=channel.write(bb,start+count);
+                                if(w<=0)throw new IOException("Не удалось записать блок");
+                                count+=w;
+                            }
+                        }
+                        // Synchronizing every 8 MiB block was a major throughput bottleneck.
+                        // Flush only at final publication, when supported by the file provider.
+                    }
+                }
+                boolean finished;
+                synchronized(inc){inc.done.set(index);persist(inc);finished=inc.done.cardinality()==inc.count;}
+                if(finished)complete(inc);
+                events.progress("Приём: "+inc.name,inc.bytesDone(),inc.size,0);
+                reply(out,200,"OK",new JSONObject().put("ok",true));return;
+                } finally { synchronized(inc){inc.writing.clear(index);} }
+            }
+            if(method.equals("PUT")&&path.equals("/bench")){
+                if(contentLength<0||contentLength>16L*1024*1024){reply(out,413,"Too Large",error("Maximum 16 MiB"));return;}
+                byte[]b=new byte[256*1024];long remaining=contentLength;
+                while(remaining>0){int n=in.read(b,0,(int)Math.min(remaining,b.length));if(n<0)throw new EOFException();remaining-=n;}
+                reply(out,200,"OK",new JSONObject().put("received",contentLength));return;
+            }
+            reply(out,404,"Not Found",error("Неизвестный запрос"));
+        }catch(Exception e){events.note("Входящее соединение: "+e.getMessage());}
+    }
+    private static void readFully(InputStream in,byte[] buf)throws IOException{
+        int pos=0;while(pos<buf.length){int n=in.read(buf,pos,buf.length-pos);if(n<0)throw new EOFException();pos+=n;}
+    }
+    private JSONObject offer(JSONObject j)throws Exception{
+        String id=j.getString("id");String name=Util.safeName(j.getString("name"));
+        String path=Util.safePath(j.optString("path",""));
+        String mime=j.optString("mime","application/octet-stream");
+        long size=j.getLong("size");
+        if(!id.matches("[0-9a-fA-F-]{36}")||size<0||size>1000L*1024*1024*1024*10||name.length()==0)
+            throw new IOException("Некорректные параметры файла");
+        int count=(int)Math.max(1,((size+Util.CHUNK-1)/Util.CHUNK));
+        Incoming inc;
+        synchronized(incoming){
+            inc=incoming.get(id);
+            if(inc==null){
+                ContentValues cv=new ContentValues();cv.put(MediaStore.Downloads.DISPLAY_NAME,name);
+                cv.put(MediaStore.Downloads.MIME_TYPE,mime);
+                cv.put(MediaStore.Downloads.RELATIVE_PATH,BASE+(path.isEmpty()?"":path+"/"));
+                cv.put(MediaStore.Downloads.IS_PENDING,1);
+                Uri uri=context.getContentResolver().insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI,cv);
+                if(uri==null)throw new IOException("Не удалось создать файл в загрузках");
+                inc=new Incoming(id,name,path,mime,uri,size,count);
+                incoming.put(id,inc);persist(inc);
+                events.note("Получение: "+(path.isEmpty()?"":path+"/")+name+" ("+Util.readable(size)+")");
+            }
+        }
+        if(inc.size!=size||!inc.name.equals(name)||!inc.path.equals(path))throw new IOException("Конфликт ID файла");
+        JSONObject r=new JSONObject();r.put("chunk",Util.CHUNK);
+        boolean allDone;
+        synchronized(inc){r.put("done",Base64.encodeToString(inc.done.toByteArray(),Base64.NO_WRAP));allDone=inc.done.cardinality()==inc.count;}
+        if(allDone)complete(inc);
+        return r;
+    }
+    private static class Incoming {
+        final String id,name,path,mime; final Uri uri;final long size;final int count;final BitSet done=new BitSet();
+        boolean completed;
+        final BitSet writing=new BitSet();
+        Incoming(String i,String n,String p,String m,Uri u,long s,int c){id=i;name=n;path=p;mime=m;uri=u;size=s;count=c;}
+        long bytesDone(){long sum=0;synchronized(this){for(int i=done.nextSetBit(0);i>=0;i=done.nextSetBit(i+1))sum+=Math.min(Util.CHUNK,size-(long)i*Util.CHUNK);}return sum;}
+    }
+    private synchronized void persist(Incoming inc){
+        try{
+            JSONObject obj=new JSONObject();obj.put("name",inc.name).put("path",inc.path).put("mime",inc.mime)
+                .put("uri",inc.uri.toString()).put("size",inc.size)
+                .put("bits",Base64.encodeToString(inc.done.toByteArray(),Base64.NO_WRAP));
+            context.getSharedPreferences(SESSIONS,0).edit().putString(inc.id,obj.toString()).apply();
+        }catch(Exception ignored){}
+    }
+    private void restore(){
+        Map<String,?> prefs=context.getSharedPreferences(SESSIONS,0).getAll();
+        for(Map.Entry<String,?>e:prefs.entrySet())try{
+            JSONObject j=new JSONObject(String.valueOf(e.getValue()));long size=j.getLong("size");
+            int count=(int)Math.max(1,(size+Util.CHUNK-1)/Util.CHUNK);
+            Incoming in=new Incoming(e.getKey(),j.getString("name"),j.optString("path"),j.getString("mime"),Uri.parse(j.getString("uri")),size,count);
+            in.done.or(BitSet.valueOf(Base64.decode(j.optString("bits",""),Base64.DEFAULT)));
+            incoming.put(in.id,in);
+        }catch(Exception ignored){}
+    }
+    private void complete(Incoming inc){
+        synchronized(inc){if(inc.completed)return;inc.completed=true;}
+        try{
+            // Persist received data once per completed file, not once per block.
+            try (ParcelFileDescriptor sync=context.getContentResolver().openFileDescriptor(inc.uri,"rw")) {
+                if(sync!=null)try{sync.getFileDescriptor().sync();}
+                    catch(IOException unsupported){ /* Some document providers don't support fsync. */ }
+            }
+            ContentValues cv=new ContentValues();cv.put(MediaStore.Downloads.IS_PENDING,0);
+            context.getContentResolver().update(inc.uri,cv,null,null);
+            events.note("Получено: "+inc.name+" ("+Util.readable(inc.size)+")");
+        }catch(Exception e){events.note("Ошибка публикации "+inc.name+": "+e.getMessage());}
+    }
+
+    public void send(String host,int port,String userPin,List<FileCatalog.Item> jobs,int lanes)throws Exception{
+        JSONObject hello=new JSONObject(Util.http(host,port,userPin,"/hello","GET",null));
+        if(!"XARKON LINK".equals(hello.optString("app")))throw new IOException("Это не совместимый приёмник QR LINK");
+        for(FileCatalog.Item job:jobs){
+            if(Thread.currentThread().isInterrupted())throw new InterruptedException();
+            if(job.size<0){FileCatalog.setStatus(context,job.id,"Ошибка: неизвестный размер");events.note("Пропуск: неизвестный размер файла "+job.name);continue;}
+            try{sendOne(host,port,userPin,job,lanes);FileCatalog.setStatus(context,job.id,"Передан");events.note("Отправлено: "+job.name);}
+            catch(Exception e){FileCatalog.setStatus(context,job.id,"Ошибка: "+e.getMessage());events.note("Ошибка отправки "+job.name+": "+e.getMessage());}
+        }
+    }
+    private void sendOne(String host,int port,String userPin,FileCatalog.Item job,int lanes)throws Exception{
+        JSONObject offer=new JSONObject().put("id",job.id).put("name",job.name)
+            .put("path",job.path).put("mime",job.mime).put("size",job.size);
+        JSONObject result=new JSONObject(Util.http(host,port,userPin,"/offer","POST",offer));
+        if(result.getInt("chunk")!=Util.CHUNK)throw new IOException("Несовместимая версия протокола");
+        int blocks=(int)Math.max(1,(job.size+Util.CHUNK-1)/Util.CHUNK);
+        BitSet completed=BitSet.valueOf(Base64.decode(result.optString("done",""),Base64.DEFAULT));
+        ArrayList<Integer>todo=new ArrayList<>();long already=0;
+        for(int i=0;i<blocks;i++){
+            if(completed.get(i))already+=Math.min(Util.CHUNK,job.size-(long)i*Util.CHUNK);else todo.add(i);
+        }
+        AtomicLong progress=new AtomicLong(already);
+        long start=Util.now(), initial=already;
+        events.progress("Отправка: "+job.name,already,job.size,0);
+        ExecutorService pool=Executors.newFixedThreadPool(Math.max(1,Math.min(lanes,8)));
+        ArrayList<Future<?>> all=new ArrayList<>();
+        // Open the Android content URI ONCE per file, not once per 8 MiB block.
+        // Positional reads let workers share a seekable descriptor without skip(offset).
+        ParcelFileDescriptor sourceDescriptor=null;
+        FileInputStream sourceStream=null;
+        FileChannel sourceChannel=null;
+        try{
+            try {
+                sourceDescriptor=context.getContentResolver().openFileDescriptor(Uri.parse(job.uri),"r");
+                if(sourceDescriptor!=null){
+                    sourceStream=new FileInputStream(sourceDescriptor.getFileDescriptor());
+                    sourceChannel=sourceStream.getChannel();
+                    // Some providers offer pipes, not seekable file descriptors.
+                    sourceChannel.position(0);
+                }
+            }catch(Exception notSeekable){
+                if(sourceStream!=null)try{sourceStream.close();}catch(Exception ignored){}
+                if(sourceDescriptor!=null)try{sourceDescriptor.close();}catch(Exception ignored){}
+                sourceStream=null;sourceDescriptor=null;sourceChannel=null;
+            }
+            final FileChannel sharedSource=sourceChannel;
+            for(int ix:todo){
+                all.add(pool.submit(()->{
+                    Exception last=null;
+                    for(int attempt=0;attempt<3;attempt++){
+                        try{
+                            sendChunk(host,port,userPin,job,ix,sharedSource);
+                            long bytes=Math.min(Util.CHUNK,job.size-(long)ix*Util.CHUNK);
+                            long n=progress.addAndGet(bytes);
+                            double seconds=Math.max(.001,(Util.now()-start)/1000.0);
+                            events.progress("Отправка: "+job.name,n,job.size,(n-initial)/seconds);
+                            return;
+                        }catch(Exception e){last=e;try{Thread.sleep(400L*(attempt+1));}catch(InterruptedException ie){Thread.currentThread().interrupt();break;}}
+                    }
+                    throw new RuntimeException(last);
+                }));
+            }
+            Exception fail=null;
+            for(Future<?> f:all)try{f.get();}catch(Exception e){fail=e;}
+            if(fail!=null)throw fail;
+        }finally{
+            pool.shutdownNow();
+            if(sourceStream!=null)try{sourceStream.close();}catch(IOException ignored){}
+            if(sourceDescriptor!=null)try{sourceDescriptor.close();}catch(IOException ignored){}
+        }
+        events.progress("Готово: "+job.name,job.size,job.size,Math.max(0,job.size-initial)/Math.max(.001,(Util.now()-start)/1000.0));
+    }
+    private void sendChunk(String host,int port,String userPin,FileCatalog.Item job,int index,FileChannel sharedSource)throws Exception{
+        long offset=(long)index*Util.CHUNK;
+        long length=Math.min(Util.CHUNK,job.size-offset);
+        URL u=new URL("http",host,port,"/chunk/"+job.id+"/"+index);
+        HttpURLConnection con=(HttpURLConnection)u.openConnection();
+        con.setRequestMethod("PUT");con.setDoOutput(true);con.setConnectTimeout(5000);con.setReadTimeout(90000);
+        con.setRequestProperty("X-Xarkon-Key",userPin);
+        con.setFixedLengthStreamingMode(length);con.setRequestProperty("Connection","close");
+        try(OutputStream out=new BufferedOutputStream(con.getOutputStream(),256*1024)){
+            byte[]buf=new byte[256*1024];long rem=length;
+            if(sharedSource!=null){
+                long position=offset;
+                while(rem>0){
+                    ByteBuffer b=ByteBuffer.wrap(buf,0,(int)Math.min(buf.length,rem));
+                    int n=sharedSource.read(b,position);
+                    if(n<=0)throw new EOFException("Не удалось прочитать исходный файл");
+                    out.write(buf,0,n);position+=n;rem-=n;
+                }
+            }else{
+                // Fallback for providers exposing nonseekable streams (e.g. cloud documents).
+                try(InputStream raw=context.getContentResolver().openInputStream(Uri.parse(job.uri))){
+                    if(raw==null)throw new IOException("Нет доступа к файлу");
+                    position(raw,offset);
+                    while(rem>0){
+                        int n=raw.read(buf,0,(int)Math.min(buf.length,rem));
+                        if(n<=0)throw new EOFException("Файл источника укорочен");
+                        out.write(buf,0,n);rem-=n;
+                    }
+                }
+            }
+        }
+        try{int response=con.getResponseCode();if(response!=200){
+                String detail="";try(InputStream e=con.getErrorStream()){if(e!=null)detail=Util.readText(e,4096);}catch(Exception ignored){}
+                throw new IOException("HTTP "+response+": "+detail);
+            }}finally{con.disconnect();}
+    }
+    private static void position(InputStream stream,long offset)throws IOException{
+        if(stream instanceof FileInputStream){
+            try{((FileInputStream)stream).getChannel().position(offset);return;}catch(Exception ignored){}
+        }
+        long remain=offset;
+        while(remain>0){long s=stream.skip(remain);if(s==0){if(stream.read()<0)throw new EOFException();s=1;}remain-=s;}
+    }
+    public static double benchmark(String host,int port,String pin,int lanes)throws Exception{
+        JSONObject hello=new JSONObject(Util.http(host,port,pin,"/hello","GET",null));
+        if(!"XARKON LINK".equals(hello.optString("app")))throw new IOException("Недоступный сервер");
+        ExecutorService pool=Executors.newFixedThreadPool(Math.max(1,Math.min(lanes,8)));
+        long start=Util.now();ArrayList<Future<?>>calls=new ArrayList<>();
+        try{
+            for(int i=0;i<32;i++)calls.add(pool.submit(()->{
+                try{
+                    HttpURLConnection conn=(HttpURLConnection)new URL("http",host,port,"/bench").openConnection();
+                    conn.setDoOutput(true);conn.setRequestMethod("PUT");conn.setConnectTimeout(5000);conn.setReadTimeout(30000);
+                    conn.setRequestProperty("X-Xarkon-Key",pin);conn.setFixedLengthStreamingMode(8*1024*1024);
+                    byte[]b=new byte[256*1024];new java.security.SecureRandom().nextBytes(b);
+                    try(OutputStream out=conn.getOutputStream()){for(int k=0;k<32;k++)out.write(b);}
+                    if(conn.getResponseCode()!=200)throw new IOException("HTTP "+conn.getResponseCode());
+                    conn.disconnect();
+                }catch(Exception e){throw new RuntimeException(e);}
+            }));
+            for(Future<?> f:calls)f.get();
+            double seconds=Math.max(.001,(Util.now()-start)/1000.0);
+            return (256d*1024*1024)/seconds;
+        }finally{pool.shutdownNow();}
+    }
+}
