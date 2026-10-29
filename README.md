@@ -1,45 +1,31 @@
-# QR LINK 0.3.9 · Android OTA
+# QR LINK · Android OTA
 
-Official QR LINK Android app, designed to build APK in GitHub Actions and update from public GitHub Releases.
+Официальный Android-проект QR LINK с автоматической сборкой и обновлениями через GitHub Releases.
 
-## Deployment state
+## Актуальная схема
 
-| Component | Status |
-| --- | --- |
-| GitHub repository | ✅ Public |
-| OTA signing identity | ✅ Created; **private backup held outside GitHub** |
-| Certificate pin | ✅ Embedded in QR LINK 0.3.9 source |
-| Static OTA manifest URL | ✅ Embedded; can't be changed in Settings |
-| GitHub Actions APK + manifest workflow | ✅ Configured |
-| Python OTA utility tests | ✅ Passing |
-| Android source ZIP | ⏳ Upload required: `QR_LINK_SOURCE.zip` |
-| Secure signing bundle Secret | ⏳ One-time setup required |
-| First signed APK / public Release | ⏳ Not yet created |
+- **Исходники хранятся непосредственно в репозитории:** [app/](app/), [app/build.gradle](app/build.gradle) и [настройки Gradle](build.gradle). Не нужно загружать новый ZIP при каждом изменении.
+- **Автосборка:** после изменения Android-кода в `main` запускается [GitHub Actions](.github/workflows/ota-release.yml). Он собирает подписанный APK, генерирует `update.json` и выпускает новую версию в [Releases](https://github.com/ANTIFERMENT/QR-LINK/releases).
+- **Постоянная подпись:** ключ находится только в GitHub Secret `QR_LINK_SIGNING_BUNDLE`. Приватный ключ не встроен в приложение и не опубликован в исходниках. Перед релизом сертификат сравнивается с закреплённым в `UpdateManager.java`.
+- **OTA в приложении:** [UpdateManager.java](app/src/main/java/dev/xarkon/link/UpdateManager.java) использует неизменяемый HTTPS-адрес манифеста, проверяет packageName, versionCode, SHA-256 и подписывающий сертификат. Системное подтверждение Android остаётся обязательным, если его запрашивает ОС.
+- **QR LINK 0.3.10:** кнопка «Обновить QR LINK» выполняет проверку, скачивание и проверку APK, затем открывает системный установщик. Автоуведомление о доступной версии запускает тот же сценарий одним нажатием.
 
-## Two actions to activate the first public release
+## Следующие версии
 
-1. Upload `QR_LINK_SOURCE.zip` (the **updated 0.3.9** source ZIP) to this repository's **root** using [Upload files](https://github.com/ANTIFERMENT/QR-LINK/upload/main). The workflow imports the ZIP automatically, no manual extraction needed.
-2. Open [Actions Secrets](https://github.com/ANTIFERMENT/QR-LINK/settings/secrets/actions). Click **New repository secret**, enter Name: `QR_LINK_SIGNING_BUNDLE`. Value: the **entire single Base64 line** from `QR_LINK_SIGNING_BUNDLE_BASE64.txt` inside the separately supplied **PRIVATE** signing backup archive. Never upload this backup archive to GitHub.
+1. Изменить нужные исходники в `app/`.
+2. **Обязательно повысить `versionCode` и `versionName` в `app/build.gradle`.** Публикация существующего тега второй раз намеренно пропускается.
+3. Сохранить изменения в `main`. Actions создаст новый релиз без использования Code on the Go и без новой загрузки ZIP.
+4. На устройстве с официальной подписью открыть QR LINK → **Настройки → Обновления приложения → Обновить QR LINK**, либо нажать «Обновить» в уведомлении о новой версии.
 
-Then visit [QR LINK · Android OTA workflow](https://github.com/ANTIFERMENT/QR-LINK/actions/workflows/ota-release.yml) and **Run workflow** if not already running. After a successful run, download the installable APK at [Releases](https://github.com/ANTIFERMENT/QR-LINK/releases).
+APK: https://github.com/ANTIFERMENT/QR-LINK/releases/latest
 
-## What the update client does
+Манифест: https://github.com/ANTIFERMENT/QR-LINK/releases/latest/download/update.json
 
-- Checks `https://github.com/ANTIFERMENT/QR-LINK/releases/latest/download/update.json` on launch (at most once every 24h), or via Settings → Check updates.
-- Downloads `QR-LINK.apk` from this repository only.
-- Confirms package ID `dev.xarkon.link`, incrementing `versionCode`, SHA-256, and the pinned release signing certificate.
-- Prompts the Android system installer. The system may require confirmation.
+## Ограничения
 
-**Important:** The old Code on the Go debug-signed APK and this newly generated release identity may be incompatible for an in-place upgrade. First installation of the new signature may require uninstalling the old APK, so back up user data. All future releases signed by the permanent identity are compatible.
+- Первая установка официально подписанного APK может потребовать удаления старого debug APK из Code on the Go, если сертификаты не совпадают. Сохрани необходимые локальные данные до удаления.
+- Android может потребовать разрешить установку из QR LINK и подтвердить APK в системном окне. Это нельзя безопасно гарантированно отключить для обычного приложения.
+- Доставка файлов между телефонами работает в локальной сети; OTA использует интернет и GitHub.
+- Исторический ZIP исходников в репозитории сохранён для справки и **не используется**, пока присутствует настоящий каталог `app/`.
 
-## Signing security
-
-- The **private key is NOT embedded into the APK**; doing so would let anyone forge a trusted update.
-- Public certificate SHA-256 fingerprint pinned in `UpdateManager.java`:
-  `2651D90F5C57F2D4A121E2D8B0899680343DC9E87E515ED5E100FC3D62C6D626`.
-- Key never committed to GitHub. Signing identity remains in one encrypted GitHub Actions secret and an offline user backup.
-- To rotate the signing key, one must explicitly change the application source, signing configuration and update strategy. There is no switch in the QR LINK UI.
-
-Workflow: [.github/workflows/ota-release.yml](.github/workflows/ota-release.yml). Tool tests: [.github/workflows/ota-tools-tests.yml](.github/workflows/ota-tools-tests.yml).
-
-**Current limit:** These tools were tested, but the 0.3.9 Android APK cannot be compiled or published until the source ZIP and signing Secret are present in GitHub.
+[Инструкция](docs/OTA_SETUP_RU.md) · [Actions](https://github.com/ANTIFERMENT/QR-LINK/actions) · [Releases](https://github.com/ANTIFERMENT/QR-LINK/releases)
