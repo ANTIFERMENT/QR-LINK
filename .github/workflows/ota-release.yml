@@ -1,0 +1,145 @@
+name: QR LINK · Android OTA
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'app/**'
+      - 'gradle/**'
+      - 'gradlew'
+      - 'gradlew.bat'
+      - 'build.gradle'
+      - 'build.gradle.kts'
+      - 'settings.gradle'
+      - 'settings.gradle.kts'
+      - 'gradle.properties'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: qr-link-ota-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Fetch source
+        uses: actions/checkout@v4
+
+      - name: Confirm Android project is present
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -d app || { echo "::error::app/ is missing. Upload QR LINK Android sources first."; exit 1; }
+          test -f settings.gradle -o -f settings.gradle.kts || { echo "::error::settings.gradle(.kts) is missing"; exit 1; }
+
+      - name: Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Android SDK
+        uses: android-actions/setup-android@v4
+
+      - name: Install SDK platforms and signing tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          sdkmanager --install "platforms;android-35" "platforms;android-36" "build-tools;36.0.0"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '9.6.1'
+
+      - name: Assemble release APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -f gradlew && -f gradle/wrapper/gradle-wrapper.jar ]]; then
+            chmod +x gradlew
+            ./gradlew --no-daemon :app:assembleRelease
+          else
+            echo "Gradle Wrapper missing/incomplete: using installed Gradle 9.6.1"
+            gradle --no-daemon :app:assembleRelease
+          fi
+
+      - name: Align, sign and verify APK
+        shell: bash
+        env:
+          QR_LINK_KEYSTORE_BASE64: ${{ secrets.QR_LINK_KEYSTORE_BASE64 }}
+          QR_LINK_KEYSTORE_PASSWORD: ${{ secrets.QR_LINK_KEYSTORE_PASSWORD }}
+          QR_LINK_KEY_ALIAS: ${{ secrets.QR_LINK_KEY_ALIAS }}
+          QR_LINK_KEY_PASSWORD: ${{ secrets.QR_LINK_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          for k in QR_LINK_KEYSTORE_BASE64 QR_LINK_KEYSTORE_PASSWORD QR_LINK_KEY_ALIAS QR_LINK_KEY_PASSWORD; do
+            [[ -n "${!k:-}" ]] || { echo "::error::Missing signing Secret: $k"; exit 1; }
+          done
+          printf '%s' "$QR_LINK_KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/qr-link.jks"
+          chmod 600 "$RUNNER_TEMP/qr-link.jks"
+          mapfile -t apks < <(find app/build/outputs/apk/release -type f -name '*.apk' ! -name '*unaligned*' | sort)
+          [[ "${#apks[@]}" -eq 1 ]] || { echo "::error::Expected one release APK, got ${#apks[@]}"; exit 1; }
+          mkdir -p dist
+          ZIPALIGN="$ANDROID_SDK_ROOT/build-tools/36.0.0/zipalign"
+          SIGNER="$ANDROID_SDK_ROOT/build-tools/36.0.0/apksigner"
+          "$ZIPALIGN" -f -p 4 "${apks[0]}" "$RUNNER_TEMP/aligned.apk"
+          "$SIGNER" sign \
+            --ks "$RUNNER_TEMP/qr-link.jks" \
+            --ks-key-alias "$QR_LINK_KEY_ALIAS" \
+            --ks-pass env:QR_LINK_KEYSTORE_PASSWORD \
+            --key-pass env:QR_LINK_KEY_PASSWORD \
+            --out dist/QR-LINK.apk \
+            "$RUNNER_TEMP/aligned.apk"
+          "$SIGNER" verify --verbose --print-certs dist/QR-LINK.apk
+          "$ZIPALIGN" -c -p 4 dist/QR-LINK.apk
+          rm -f "$RUNNER_TEMP/qr-link.jks"
+
+      - name: Generate and validate update.json
+        id: metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/make_manifest.py \
+            --apk dist/QR-LINK.apk \
+            --aapt "$ANDROID_SDK_ROOT/build-tools/36.0.0/aapt" \
+            --repo "$GITHUB_REPOSITORY" \
+            --output dist/update.json \
+            --github-output "$GITHUB_OUTPUT"
+          python3 -m json.tool dist/update.json >/dev/null
+
+      - name: Save APK and manifest as workflow artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: QR-LINK-APK-and-OTA
+          path: dist/
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Notice when repository is private
+        if: ${{ github.event.repository.private }}
+        run: echo "::warning::This repository is private; unauthenticated Android clients cannot download Release assets."
+
+      - name: Publish new version to GitHub Releases
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.metadata.outputs.tag }}
+          RELEASE_VERSION: ${{ steps.metadata.outputs.version }}
+        run: |
+          set -euo pipefail
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "::notice::Version $RELEASE_TAG was already released. Change versionName and versionCode for the next release."
+            exit 0
+          fi
+          gh release create "$RELEASE_TAG" dist/QR-LINK.apk dist/update.json \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "QR LINK $RELEASE_VERSION" \
+            --generate-notes \
+            --latest
