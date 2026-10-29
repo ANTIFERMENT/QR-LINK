@@ -51,6 +51,8 @@ public final class MainActivity extends Activity {
     private boolean navigating,emergency,suppressEntranceAnimations;
     private ScrollView scroller;
     private FrameLayout screenHost;
+    private FrameLayout statusBarShield;
+    private int statusShieldHeight;
     private boolean screenTransition;
     private int screenDirection=1;
     private LinearLayout content,root;
@@ -95,6 +97,59 @@ public final class MainActivity extends Activity {
         for(int i=0;i<ACCENTS.length;i++)if(ACCENTS[i]==value)return i;
         return -1;
     }
+    /** Solid system-bar background, distinct from the page, including AMOLED. */
+    private int statusShieldColor(){
+        return amoled()?0xff16171c:light()?0xffe6edf4:0xff192a39;
+    }
+    private int initialStatusHeight(){
+        int id=getResources().getIdentifier("status_bar_height","dimen","android");
+        if(id!=0)try{return getResources().getDimensionPixelSize(id);}
+        catch(android.content.res.Resources.NotFoundException ignored){}
+        return dp(29);
+    }
+    private void setupStatusBarShield(){
+        if(screenHost==null)return;
+        if(statusBarShield==null){
+            statusBarShield=new FrameLayout(this);
+            statusBarShield.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+            View underline=new View(this);
+            underline.setBackgroundColor(amoled()?0xff303039:light()?0xffd0dbe5:0xff314554);
+            statusBarShield.addView(underline,new FrameLayout.LayoutParams(
+                -1,dp(1),Gravity.BOTTOM));
+        }else{
+            View underline=statusBarShield.getChildAt(0);
+            if(underline!=null)underline.setBackgroundColor(
+                amoled()?0xff303039:light()?0xffd0dbe5:0xff314554);
+        }
+        statusBarShield.setBackgroundColor(statusShieldColor());
+        if(statusBarShield.getParent() instanceof ViewGroup)
+            ((ViewGroup)statusBarShield.getParent()).removeView(statusBarShield);
+        if(statusShieldHeight<=0)statusShieldHeight=initialStatusHeight();
+        screenHost.addView(statusBarShield,new FrameLayout.LayoutParams(
+            -1,statusShieldHeight,Gravity.TOP));
+        statusBarShield.setElevation(dp(15));
+        screenHost.setOnApplyWindowInsetsListener((v,insets)->{
+            int top;
+            if(Build.VERSION.SDK_INT>=30){
+                android.graphics.Insets bar=insets.getInsetsIgnoringVisibility(
+                    WindowInsets.Type.statusBars());
+                android.graphics.Insets cutout=insets.getInsets(
+                    WindowInsets.Type.displayCutout());
+                top=Math.max(bar.top,cutout.top);
+            }else{
+                top=insets.getSystemWindowInsetTop();
+            }
+            top=Math.max(initialStatusHeight(),top);
+            if(statusBarShield!=null&&top!=statusShieldHeight){
+                statusShieldHeight=top;
+                FrameLayout.LayoutParams lp=(FrameLayout.LayoutParams)
+                    statusBarShield.getLayoutParams();
+                if(lp!=null){lp.height=top;statusBarShield.setLayoutParams(lp);}
+            }
+            return insets;
+        });
+        screenHost.post(screenHost::requestApplyInsets);
+    }
     private int onAccent(){
         double r=Color.red(accent)/255.0,g=Color.green(accent)/255.0,b=Color.blue(accent)/255.0;
         r=r<=.04045?r/12.92:Math.pow((r+.055)/1.055,2.4);
@@ -121,7 +176,7 @@ public final class MainActivity extends Activity {
             muted=0xff9caebd;stroke=0xff283947;buttonBg=0xff203140;
             soft=0xff101924;subtle=0xff0d1722;
         }
-        getWindow().setStatusBarColor(bg);
+        getWindow().setStatusBarColor(statusShieldColor());
         getWindow().setNavigationBarColor(bg);
     }
         @Override public void onCreate(Bundle saved){setTheme(themeStyle());super.onCreate(saved);current=new WeakReference<>(this);
@@ -410,6 +465,7 @@ public final class MainActivity extends Activity {
             diag.setOnClickListener(v->{Intent i=new Intent(this,RecoveryActivity.class);
                 i.putExtra("show",true);startActivity(i);finish();});fallback.addView(diag);
             screenHost=null;
+            statusBarShield=null;
             setContentView(fallback);
         }catch(Throwable fail){throw new RuntimeException("QR LINK recovery screen failed",fail);}
     }
@@ -428,12 +484,17 @@ public final class MainActivity extends Activity {
             screenHost.setBackgroundColor(bg);
             setContentView(screenHost);
         }else screenHost.setBackgroundColor(bg);
+        // Keep the shield above all page layers. It must not be mistaken
+        // for the outgoing page during a crossfade.
+        if(statusBarShield!=null&&statusBarShield.getParent()==screenHost)
+            screenHost.removeView(statusBarShield);
         final View outgoing=screenHost.getChildCount()>0
             ?screenHost.getChildAt(screenHost.getChildCount()-1):null;
         final boolean swap=screenTransition&&outgoing!=null&&motion()&&!suppressEntranceAnimations;
         screenTransition=false;
         if(!swap)screenHost.removeAllViews();
         screenHost.addView(scroller,new FrameLayout.LayoutParams(-1,-1));
+        setupStatusBarShield();
         UiMotion.systemBars(this,light());
         // The initial call may be too early; repeat when the view is attached.
         scroller.post(scroller::requestApplyInsets);
@@ -517,7 +578,6 @@ public final class MainActivity extends Activity {
         button(recv,"receive","ПОЛУЧИТЬ",true,()->{
             navigate(RECEIVE);if(!TransferService.isReceiving)beginReceive();
         });
-        LinearLayout foot=panel("Без интернета","Без общей сети QR LINK создаст Wi-Fi Direct группу. Подключение по одному QR, без роутера.","wifi");
     }
     /** One premium progress panel shared by Send and Receive screens. */
     private void liveStatus(){
@@ -763,37 +823,49 @@ public final class MainActivity extends Activity {
         space(parent,7);margin(parent,frequency,8);
         final String[] labels=OtaUpdateSchedule.INTERVAL_NAMES;
         final long[] hours=OtaUpdateSchedule.INTERVAL_HOURS;
-        final ArrayList<TextView> tiles=new ArrayList<>();
-        final long chosen=prefs().getLong(OtaUpdateSchedule.PREF_FREQUENCY,24L);
+        int initial=4;
+        long configured=prefs().getLong(OtaUpdateSchedule.PREF_FREQUENCY,24L);
+        for(int i=0;i<hours.length;i++)if(hours[i]==configured)initial=i;
         margin(frequency,text("ЧАСТОТА ПРОВЕРКИ",11,muted,true),12);
-        for(int start=0;start<labels.length;start+=2){
-            LinearLayout line=row();margin(frequency,line,8);
-            for(int i=start;i<Math.min(start+2,labels.length);i++){
-                final int selected=i;
-                TextView tile=text(labels[i],12,hours[i]==chosen?accent:fg,hours[i]==chosen);
-                tile.setGravity(Gravity.CENTER);tile.setMinHeight(dp(47));
-                tile.setPadding(dp(5),dp(10),dp(5),dp(10));
-                LinearLayout.LayoutParams lp=new LinearLayout.LayoutParams(0,-2,1);
-                lp.setMargins(dp(3),0,dp(3),0);line.addView(tile,lp);
-                tiles.add(tile);
-                interactive(tile,()->{
-                    prefs().edit().putLong(OtaUpdateSchedule.PREF_FREQUENCY,hours[selected]).apply();
-                    OtaUpdateSchedule.configure(this);
-                    for(int k=0;k<tiles.size();k++){
-                        boolean active=hours[k]==hours[selected];
-                        TextView t=tiles.get(k);
-                        t.setBackground(ripple(active?soft:buttonBg,active?accent:stroke,12));
-                        t.setTextColor(active?accent:fg);
-                        t.setTypeface(android.graphics.Typeface.DEFAULT,
-                            active?android.graphics.Typeface.BOLD:android.graphics.Typeface.NORMAL);
-                    }
-                });
+        LinearLayout sliderCard=column();
+        sliderCard.setPadding(dp(9),dp(15),dp(9),dp(12));
+        sliderCard.setBackground(shape(soft,stroke,15));
+        margin(frequency,sliderCard,7);
+        SeekBar slider=new SeekBar(this);
+        slider.setMax(hours.length-1);
+        slider.setProgressTintList(ColorStateList.valueOf(accent));
+        slider.setThumbTintList(ColorStateList.valueOf(accent));
+        slider.setProgressBackgroundTintList(ColorStateList.valueOf(stroke));
+        slider.setSplitTrack(false);
+        slider.setProgress(initial);
+        sliderCard.addView(slider,new LinearLayout.LayoutParams(-1,dp(46)));
+        TextView selectedLabel=text(labels[initial],15,accent,true);
+        selectedLabel.setGravity(Gravity.CENTER);
+        LinearLayout.LayoutParams captionParams=new LinearLayout.LayoutParams(-1,-2);
+        captionParams.setMargins(0,dp(6),0,dp(3));
+        sliderCard.addView(selectedLabel,captionParams);
+        slider.setContentDescription("Частота проверки обновлений");
+        slider.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener(){
+            private int last=slider.getProgress();
+            @Override public void onProgressChanged(SeekBar seek,int value,boolean fromUser){
+                if(value==last)return;
+                last=value;
+                selectedLabel.animate().cancel();
+                selectedLabel.setText(labels[value]);
+                selectedLabel.setAlpha(.72f);
+                selectedLabel.setScaleX(.98f);selectedLabel.setScaleY(.98f);
+                selectedLabel.animate().alpha(1f).scaleX(1f).scaleY(1f)
+                    .setDuration(145).setInterpolator(new DecelerateInterpolator()).start();
+                if(fromUser&&prefs().getBoolean("haptics",true))
+                    seek.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK);
             }
-        }
-        for(int i=0;i<tiles.size();i++){
-            boolean active=hours[i]==chosen;
-            tiles.get(i).setBackground(ripple(active?soft:buttonBg,active?accent:stroke,12));
-        }
+            @Override public void onStartTrackingTouch(SeekBar seek){}
+            @Override public void onStopTrackingTouch(SeekBar seek){
+                long newHours=hours[seek.getProgress()];
+                prefs().edit().putLong(OtaUpdateSchedule.PREF_FREQUENCY,newHours).apply();
+                OtaUpdateSchedule.configure(MainActivity.this);
+            }
+        });
         boolean enabled=prefs().getBoolean(OtaUpdateSchedule.PREF_BACKGROUND,false);
         frequency.setAlpha(enabled?1f:.45f);
         setEnabledChildren(frequency,enabled);
@@ -851,10 +923,10 @@ public final class MainActivity extends Activity {
         beginUpdateCheck(ui);
     }
     private void beginUpdateCheck(OtaProgressDialog ui){
-        ui.stage("Проверяем подключение…","Интернет и сервер обновлений");
+        ui.stage("Проверка соединения...","Подключение к серверу...");
         UpdateManager.check(this,UpdateManager.MANIFEST_URL,new UpdateManager.Callback(){
             @Override public void status(String message){
-                if(!isFinishing()&&!isDestroyed())ui.stage(message,"Интернет и сервер обновлений");
+                if(!isFinishing()&&!isDestroyed())ui.stage(message,"Подключение к серверу...");
             }
             @Override public void release(UpdateManager.Release r,boolean newer){
                 if(isFinishing()||isDestroyed())return;

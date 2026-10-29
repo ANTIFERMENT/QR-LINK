@@ -5,6 +5,11 @@ import android.app.Activity;
 import android.app.Dialog;
 import android.content.res.ColorStateList;
 import android.graphics.Color;
+import android.graphics.Canvas;
+import android.graphics.Paint;
+import android.graphics.RectF;
+import android.content.Context;
+import android.view.animation.LinearInterpolator;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.view.Gravity;
@@ -22,7 +27,8 @@ import java.util.Locale;
 public final class OtaProgressDialog {
     private final Activity activity;
     private final Dialog dialog;
-    private final TextView heading, label, details, bytes, percent, primary, secondary, mark;
+    private final TextView heading, label, details, bytes, percent, primary, secondary;
+    private final View mark;
     private final ProgressBar bar;
     private final int accent, foreground, muted, panel;
     private final boolean animate;
@@ -30,6 +36,29 @@ public final class OtaProgressDialog {
     private long lastBytes, lastTotal;
     private boolean shown;
 
+    /** Geometrically centered stroke; rotates without font metrics or glyph wobble. */
+    private static final class CenteredRing extends View {
+        private final Paint paint=new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final RectF bounds=new RectF();
+        private final int color;
+        CenteredRing(Context context,int tint){super(context);color=tint;}
+        @Override protected void onDraw(Canvas canvas){
+            super.onDraw(canvas);
+            float density=getResources().getDisplayMetrics().density;
+            float stroke=3.1f*density;
+            float cx=getWidth()/2f,cy=getHeight()/2f;
+            float radius=Math.min(getWidth(),getHeight())/2f-stroke*1.5f;
+            if(radius<=0)return;
+            paint.setStyle(Paint.Style.STROKE);
+            paint.setStrokeWidth(stroke);
+            paint.setStrokeCap(Paint.Cap.ROUND);
+            paint.setColor((color&0x00ffffff)|0x38000000);
+            canvas.drawCircle(cx,cy,radius,paint);
+            paint.setColor(color);
+            bounds.set(cx-radius,cy-radius,cx+radius,cy+radius);
+            canvas.drawArc(bounds,-90f,270f,false,paint);
+        }
+    }
     private int dp(float x){ return (int)(activity.getResources().getDisplayMetrics().density*x+.5f); }
     private GradientDrawable shape(int color,int border,int radius){
         GradientDrawable d=new GradientDrawable();d.setColor(color);d.setCornerRadius(dp(radius));
@@ -66,16 +95,16 @@ public final class OtaProgressDialog {
         LinearLayout top=new LinearLayout(a);top.setOrientation(LinearLayout.HORIZONTAL);top.setGravity(Gravity.CENTER_VERTICAL);
         FrameLayout symbolBox=new FrameLayout(a);symbolBox.setBackground(shape((accent&0x00ffffff)|0x22000000,0,15));
         LinearLayout.LayoutParams sb=new LinearLayout.LayoutParams(dp(53),dp(53));sb.rightMargin=dp(14);top.addView(symbolBox,sb);
-        mark=text("↻",31,accent,true);mark.setGravity(Gravity.CENTER);
-        symbolBox.addView(mark,new FrameLayout.LayoutParams(-1,-1));
+        mark=new CenteredRing(a,accent);
+        symbolBox.addView(mark,new FrameLayout.LayoutParams(dp(33),dp(33),Gravity.CENTER));
         LinearLayout titles=new LinearLayout(a);titles.setOrientation(LinearLayout.VERTICAL);
         heading=text("Обновление QR LINK",20,foreground,true);titles.addView(heading);
         TextView sub=text("БЕЗОПАСНОЕ ОБНОВЛЕНИЕ",10,muted,true);
         LinearLayout.LayoutParams subLp=new LinearLayout.LayoutParams(-1,-2);subLp.topMargin=dp(7);titles.addView(sub,subLp);
         top.addView(titles,new LinearLayout.LayoutParams(0,-2,1));root.addView(top);
-        label=text("Проверяем подключение…",15,foreground,true);
+        label=text("Проверка соединения...",15,foreground,true);
         LinearLayout.LayoutParams sl=new LinearLayout.LayoutParams(-1,-2);sl.topMargin=dp(25);root.addView(label,sl);
-        details=text("Подключение к интернету",12,muted,false);
+        details=text("Подключение к серверу...",12,muted,false);
         LinearLayout.LayoutParams dl=new LinearLayout.LayoutParams(-1,-2);dl.topMargin=dp(7);root.addView(details,dl);
         LinearLayout numbers=new LinearLayout(a);numbers.setOrientation(LinearLayout.HORIZONTAL);
         numbers.setGravity(Gravity.CENTER_VERTICAL);
@@ -123,13 +152,20 @@ public final class OtaProgressDialog {
     public boolean isShowing(){return shown&&dialog.isShowing();}
     public void dismiss(){if(dialog.isShowing())dialog.dismiss();}
     private void rotating(boolean enabled){
-        if(spin!=null){spin.cancel();spin=null;}
-        mark.setRotation(0f);
-        if(enabled&&animate){
-            spin=ValueAnimator.ofFloat(0,360);spin.setDuration(1550);
+        if(enabled){
+            // Progress events arrive every few milliseconds. Keep one animator alive
+            // instead of restarting it (which made the icon shake and stop).
+            if(spin!=null&&spin.isRunning())return;
+            mark.setRotation(0f);
+            spin=ValueAnimator.ofFloat(0f,360f);
+            spin.setDuration(1100L);
+            spin.setInterpolator(new LinearInterpolator());
             spin.setRepeatCount(ValueAnimator.INFINITE);
             spin.addUpdateListener(v->mark.setRotation((float)v.getAnimatedValue()));
             spin.start();
+        }else{
+            if(spin!=null){spin.cancel();spin=null;}
+            mark.setRotation(0f);
         }
     }
     public void stage(String step,String hint){
@@ -141,7 +177,7 @@ public final class OtaProgressDialog {
     }
     public void downloading(long received,long total){
         if(received<0)return;
-        rotating(false);bar.setIndeterminate(total<=0);
+        rotating(true);bar.setIndeterminate(total<=0);
         label.setText("Загрузка обновления");
         details.setText("Загрузка защищённого обновления");
         primary.setVisibility(View.GONE);

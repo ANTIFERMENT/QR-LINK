@@ -127,7 +127,7 @@ public final class UpdateManager {
         new Thread(()->{
             try{
                 if(!MANIFEST_URL.equals(manifestUrl))throw new IOException("Недоверенный источник обновления.");
-                activity.runOnUiThread(()->cb.status("Проверяем интернет и сервер…"));
+                activity.runOnUiThread(()->cb.status("Проверка соединения..."));
                 Release info=fetchLatest(activity.getApplicationContext());
                 long installed=activity.getPackageManager().getPackageInfo(activity.getPackageName(),0).getLongVersionCode();
                 activity.runOnUiThread(()->cb.release(info,info.versionCode>installed));
