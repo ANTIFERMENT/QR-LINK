@@ -9,7 +9,7 @@ import zipfile
 ROOT = Path.cwd()
 MAX_TOTAL = 150 * 1024 * 1024
 MAX_FILE = 70 * 1024 * 1024
-FORBIDDEN = (".github/", "scripts/", "ota/", ".git/")
+FORBIDDEN = (".github/", "scripts/", "ota/", ".git/", "docs/", "tests/")
 SOURCE = ROOT / "QR_LINK_SOURCE.zip"
 
 def fail(msg):
@@ -44,7 +44,7 @@ def main():
             p = PurePosixPath(relative)
             if p.is_absolute() or ".." in p.parts or ":" in relative or "\x00" in relative:
                 fail("unsafe ZIP path")
-            if (relative.startswith(FORBIDDEN) or relative == "local.properties"
+            if (relative.startswith(FORBIDDEN) or relative in ("local.properties", ".gitignore", "README.md", "README_RU.md")
                     or relative.startswith(".gradle/") or "/build/" in relative
                     or relative.endswith((".jks", ".keystore", ".p12", ".pfx", ".pem", ".key"))):
                 print("Skipping generated, private or repository-managed file:", relative)
