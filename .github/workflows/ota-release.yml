@@ -5,6 +5,7 @@ on:
   push:
     branches: [main]
     paths:
+      - 'QR_LINK_SOURCE.zip'
       - 'app/**'
       - 'gradle/**'
       - 'gradlew'
@@ -29,6 +30,10 @@ jobs:
     steps:
       - name: Fetch source
         uses: actions/checkout@v4
+
+      - name: Import source ZIP when Android project is not checked in
+        shell: bash
+        run: python3 scripts/import_source_zip.py
 
       - name: Confirm Android project is present
         shell: bash
