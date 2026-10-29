@@ -1,0 +1,27 @@
+name: QR LINK · OTA tool tests
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'scripts/**'
+      - 'ota/**'
+      - 'tests/**'
+      - '.github/workflows/ota-tools-tests.yml'
+  pull_request:
+    paths:
+      - 'scripts/**'
+      - 'ota/**'
+      - 'tests/**'
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run offline OTA utility tests
+        run: python3 -m unittest discover -v -s tests
