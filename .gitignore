@@ -1,0 +1,19 @@
+# Local settings and caches
+.gradle/
+.idea/
+**/build/
+local.properties
+*.iml
+# Never commit signing credentials or files
+*.jks
+*.keystore
+*.p12
+*.pfx
+*.pem
+*.key
+.env
+.env.*
+# Release output
+dist/
+.DS_Store
+Thumbs.db
