@@ -21,7 +21,7 @@ import com.google.zxing.common.BitMatrix;
 import java.lang.ref.WeakReference;
 import java.util.*;
 
-/** QR LINK 0.3.11: AMOLED OTA window and Russian network diagnostics. */
+/** QR LINK 0.3.12: safe system insets, seamless screens and 512 MiB benchmark. */
 public final class MainActivity extends Activity {
     private static final int FILES=41,FOLDER=42,SCAN=43,CAMERA_PERMISSION=44,WIFI_PERMISSION=45,WIFI_SEND_PERMISSION=46;
     private static final int HOME=0,SEND=1,RECEIVE=2,SETTINGS=3,HISTORY=4,FTP=5;
@@ -158,7 +158,7 @@ public final class MainActivity extends Activity {
     @Override protected void onDestroy(){if(current.get()==this)current.clear();super.onDestroy();}
     @Override public void onBackPressed(){if(page==HOME){super.onBackPressed();}else if(page==HISTORY||page==FTP){navigate(SETTINGS);}else navigate(HOME);}
     private GradientDrawable shape(int color,int line,int round){GradientDrawable d=new GradientDrawable();d.setColor(color);d.setCornerRadius(dp(round));if(line!=0)d.setStroke(dp(1),line);return d;}
-    private TextView text(String value,int size,int color,boolean heavy){TextView t=new TextView(this);
+    private TextView text(CharSequence value,int size,int color,boolean heavy){TextView t=new TextView(this);
         t.setText(value);t.setTextSize(size);t.setTextColor(color);t.setIncludeFontPadding(false);
         if(heavy)t.setTypeface(android.graphics.Typeface.DEFAULT,1);return t;}
     private LinearLayout column(){LinearLayout l=new LinearLayout(this);l.setOrientation(LinearLayout.VERTICAL);return l;}
@@ -235,7 +235,7 @@ public final class MainActivity extends Activity {
         if(subtitle!=null&&!subtitle.isEmpty()){space(l,5);l.addView(text(subtitle,13,muted,false));}
         heading.addView(l,new LinearLayout.LayoutParams(0,-2,1));p.addView(heading);space(p,17);return p;
     }
-    private LinearLayout section(String key,String title,String subtitle,String glyph,boolean unusedDefaultOpen){
+    private LinearLayout section(String key,String title,CharSequence subtitle,String glyph,boolean unusedDefaultOpen){
         LinearLayout shell=column();shell.setBackground(shape(card,stroke,22));
         shell.setClipChildren(true);shell.setClipToPadding(true);
         margin(content,shell,13);animateIn(shell,content.getChildCount()-1);
@@ -411,7 +411,10 @@ public final class MainActivity extends Activity {
         qrImage=null;receiveHint=null;receiveCaption=null;networkBadge=null;
         scroller=new ScrollView(this);scroller.setFillViewport(true);scroller.setClipToPadding(false);
         scroller.setBackgroundColor(bg);scroller.setVerticalScrollBarEnabled(false);
-        UiMotion.applySafeInsets(this,scroller,dp(9),dp(7));
+        // Keep the window background identical to the screen during navigation and
+        // while Android 17 applies edge-to-edge system insets.
+        getWindow().setBackgroundDrawable(new android.graphics.drawable.ColorDrawable(bg));
+        UiMotion.applySafeInsets(this,scroller,dp(12),dp(7));
         root=column();root.setPadding(dp(19),dp(16),dp(19),dp(25));scroller.addView(root);
         setContentView(scroller);
         // Configure bars only AFTER a root view has been installed.
@@ -453,14 +456,21 @@ public final class MainActivity extends Activity {
     private void navigate(int value){
         if(navigating||page==value)return;
         if(value==SETTINGS)expandedSections.clear();
-        if(motion()&&scroller!=null){
-            navigating=true;
-            ScrollView outgoing=scroller;
-            outgoing.animate().alpha(0f).translationY(-dp(9)).setDuration(120)
-                .setInterpolator(new DecelerateInterpolator()).withEndAction(()->{
-                    navigating=false;page=value;show();
-                }).start();
-        }else{page=value;show();}
+        navigating=true;
+        if(scroller!=null)scroller.animate().cancel();
+        // Build the next screen immediately. Fading the previous ScrollView to zero
+        // exposed the phone's grey default window for one full frame.
+        page=value;
+        boolean slide=motion();
+        suppressEntranceAnimations=slide;
+        try{show();}finally{suppressEntranceAnimations=false;navigating=false;}
+        if(slide&&scroller!=null&&!emergency){
+            ScrollView incoming=scroller;
+            incoming.setAlpha(.96f);
+            incoming.setTranslationY(dp(4));
+            incoming.animate().alpha(1f).translationY(0f).setDuration(155)
+                .setInterpolator(new DecelerateInterpolator(1.45f)).start();
+        }
     }
     private void home(){
         LinearLayout hero=column();hero.setPadding(dp(18),dp(20),dp(18),dp(18));
@@ -629,6 +639,18 @@ public final class MainActivity extends Activity {
             }
         });
     }
+    /** Retain bold/accent span in the settings section subtitle. */
+    private CharSequence updatesSubtitle(){
+        android.text.SpannableStringBuilder line=
+            new android.text.SpannableStringBuilder("Проверка обновлений ");
+        int start=line.length();
+        line.append("QR LINK");
+        line.setSpan(new android.text.style.ForegroundColorSpan(accent),start,line.length(),
+            android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+        line.setSpan(new android.text.style.StyleSpan(android.graphics.Typeface.BOLD),
+            start,line.length(),android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+        return line;
+    }
     private void settingsPage(){
         LinearLayout summary=column();summary.setPadding(dp(7),dp(2),dp(7),dp(14));
         margin(content,summary,6);
@@ -653,7 +675,7 @@ public final class MainActivity extends Activity {
         settingToggle(performance,"wifi","Предпочитать Wi-Fi Direct 5 ГГц",
             "Высокая скорость при поддержке обоих телефонов. При отказе используется автоматический диапазон.",
             "prefer_5ghz",true);
-        outlineButton(performance,"speed","Тест скорости сети · 256 МиБ",()->{
+        outlineButton(performance,"speed","Проверка скорости сети",()->{
             if(!paired()){toast("Сначала подключитесь с помощью QR-кода");navigate(SEND);}else start(TransferService.BENCH);
         });
         LinearLayout utilities=section("tools","Инструменты","ShareMe FTP, журнал и системные средства","link",false);
@@ -666,7 +688,7 @@ public final class MainActivity extends Activity {
             try{startActivity(new Intent(Settings.ACTION_WIFI_SETTINGS));}catch(Exception e){toast(e.getMessage());}
         });
         LinearLayout updater=section("updates","Обновления",
-            "QR LINK · новая версия","receive",false);
+            updatesSubtitle(),"receive",false);
         outlineButton(updater,"check","Проверить обновление",this::checkForUpdates);
         LinearLayout about=section("about","Информация и безопасность","Версия, протокол, хранение файлов","info",false);
         about.addView(text("QR LINK "+getAppVersion(),16,fg,true));space(about,9);

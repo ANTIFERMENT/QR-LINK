@@ -73,29 +73,50 @@ public final class UiMotion {
         }
     }
 
-    /** Insets are applied to the root view, including landscape cutouts and navigation. */
+    /**
+     * In Android 15–17 the app is edge-to-edge even before the first insets dispatch.
+     * Reserve the device's status bar dimension immediately, then replace it with
+     * actual status/navigation/cutout insets. Never add the fallback twice.
+     */
     public static void applySafeInsets(Activity activity, View view, int baseTop, int baseBottom) {
-        final int baseLeft = view.getPaddingLeft();
-        final int baseRight = view.getPaddingRight();
-        view.setOnApplyWindowInsetsListener((v, insets) -> {
-            int left, top, right, bottom;
-            if (Build.VERSION.SDK_INT >= 30) {
-                Insets safe = insets.getInsets(WindowInsets.Type.statusBars()
-                        | WindowInsets.Type.navigationBars()
-                        | WindowInsets.Type.displayCutout());
-                left = safe.left;
-                top = safe.top;
-                right = safe.right;
-                bottom = safe.bottom;
-            } else {
-                left = insets.getSystemWindowInsetLeft();
-                top = insets.getSystemWindowInsetTop();
-                right = insets.getSystemWindowInsetRight();
-                bottom = insets.getSystemWindowInsetBottom();
+        final int baseLeft=view.getPaddingLeft();
+        final int baseRight=view.getPaddingRight();
+        final int statusHeight=resourceStatusHeight(activity);
+        view.setPadding(baseLeft,baseTop+statusHeight,baseRight,baseBottom);
+        view.setOnApplyWindowInsetsListener((v,insets)->{
+            int left,top,right,bottom;
+            if(Build.VERSION.SDK_INT>=30){
+                int bars=WindowInsets.Type.statusBars()|WindowInsets.Type.navigationBars();
+                Insets safe=insets.getInsetsIgnoringVisibility(bars);
+                Insets cutout=insets.getInsets(WindowInsets.Type.displayCutout());
+                left=Math.max(safe.left,cutout.left);
+                top=Math.max(Math.max(safe.top,cutout.top),statusHeight);
+                right=Math.max(safe.right,cutout.right);
+                bottom=Math.max(safe.bottom,cutout.bottom);
+            }else{
+                left=insets.getSystemWindowInsetLeft();
+                top=Math.max(insets.getSystemWindowInsetTop(),statusHeight);
+                right=insets.getSystemWindowInsetRight();
+                bottom=insets.getSystemWindowInsetBottom();
             }
-            v.setPadding(baseLeft + left, baseTop + top, baseRight + right,
-                    baseBottom + bottom);
+            v.setPadding(baseLeft+left,baseTop+top,baseRight+right,baseBottom+bottom);
             return insets;
         });
+        // Android OEMs can dispatch first insets after content installation.
+        // The fallback above protects the header on that initial frame as well.
+        if(view.isAttachedToWindow())view.requestApplyInsets();
+        else view.addOnAttachStateChangeListener(new View.OnAttachStateChangeListener(){
+            @Override public void onViewAttachedToWindow(View attached){
+                attached.removeOnAttachStateChangeListener(this);
+                attached.requestApplyInsets();
+            }
+            @Override public void onViewDetachedFromWindow(View detached){}
+        });
+    }
+    private static int resourceStatusHeight(Activity activity){
+        int id=activity.getResources().getIdentifier("status_bar_height","dimen","android");
+        if(id==0)return 0;
+        try{return activity.getResources().getDimensionPixelSize(id);}
+        catch(android.content.res.Resources.NotFoundException e){return 0;}
     }
 }

@@ -372,16 +372,16 @@ public final class TransferEngine {
                 try{
                     HttpURLConnection conn=(HttpURLConnection)new URL("http",host,port,"/bench").openConnection();
                     conn.setDoOutput(true);conn.setRequestMethod("PUT");conn.setConnectTimeout(5000);conn.setReadTimeout(30000);
-                    conn.setRequestProperty("X-Xarkon-Key",pin);conn.setFixedLengthStreamingMode(8*1024*1024);
+                    conn.setRequestProperty("X-Xarkon-Key",pin);conn.setFixedLengthStreamingMode(16*1024*1024);
                     byte[]b=new byte[256*1024];new java.security.SecureRandom().nextBytes(b);
-                    try(OutputStream out=conn.getOutputStream()){for(int k=0;k<32;k++)out.write(b);}
+                    try(OutputStream out=conn.getOutputStream()){for(int k=0;k<64;k++)out.write(b);}
                     if(conn.getResponseCode()!=200)throw new IOException("HTTP "+conn.getResponseCode());
                     conn.disconnect();
                 }catch(Exception e){throw new RuntimeException(e);}
             }));
             for(Future<?> f:calls)f.get();
             double seconds=Math.max(.001,(Util.now()-start)/1000.0);
-            return (256d*1024*1024)/seconds;
+            return (512d*1024*1024)/seconds;
         }finally{pool.shutdownNow();}
     }
 }

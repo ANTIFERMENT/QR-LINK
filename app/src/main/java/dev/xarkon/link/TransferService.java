@@ -149,7 +149,7 @@ public final class TransferService extends Service implements TransferEngine.Eve
             android.content.SharedPreferences p=getSharedPreferences("settings",0);
             String host=p.getString("host","");int port=p.getInt("port",Util.PORT);
             String pin=p.getString("key","");int lanes=p.getInt("lanes",4);
-            note("Тест сети: 256 МиБ данных, "+lanes+" поток(а/ов)");
+            note("Тест сети: 512 МиБ данных, "+lanes+" поток(а/ов)");
             double rate=TransferEngine.benchmark(host,port,pin,lanes);
             note(String.format(Locale.US,"Тест завершён: %.1f МиБ/с (%.0f Мбит/с)",rate/1048576.0,rate*8/1000000.0));
         });
