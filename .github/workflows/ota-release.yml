@@ -6,6 +6,8 @@ on:
     branches: [main]
     paths:
       - 'QR_LINK_SOURCE.zip'
+      - 'QR_LINK_v*.zip'
+      - 'scripts/import_source_zip.py'
       - 'scripts/sign_release.py'
       - 'scripts/make_manifest.py'
       - 'app/**'
