@@ -2,20 +2,22 @@
     <style name="AppTheme" parent="android:style/Theme.Material.NoActionBar">
         <item name="android:fontFamily">sans</item>
         <item name="android:colorAccent">#5CDDCe</item>
-        <item name="android:statusBarColor">#09121B</item>
-        <item name="android:navigationBarColor">#09121B</item>
+        <item name="android:statusBarColor">#0A111B</item>
+        <item name="android:navigationBarColor">#0A111B</item>
         <item name="android:windowLightStatusBar">false</item>
         <item name="android:windowLightNavigationBar">false</item>
         <item name="android:windowActionModeOverlay">true</item>
+        <item name="android:windowBackground">#0A111B</item>
     </style>
     <style name="AppThemeLight" parent="android:style/Theme.Material.Light.NoActionBar">
         <item name="android:fontFamily">sans</item>
         <item name="android:colorAccent">#328F85</item>
-        <item name="android:statusBarColor">#F3F7FB</item>
-        <item name="android:navigationBarColor">#F3F7FB</item>
+        <item name="android:statusBarColor">#F5F7FB</item>
+        <item name="android:navigationBarColor">#F5F7FB</item>
         <item name="android:windowLightStatusBar">true</item>
         <item name="android:windowLightNavigationBar">true</item>
         <item name="android:windowActionModeOverlay">true</item>
+        <item name="android:windowBackground">#F5F7FB</item>
     </style>
     <style name="QrAmoledDialog" parent="android:style/Theme.Material.Dialog.Alert">
         <item name="android:windowBackground">#0B0B0D</item>

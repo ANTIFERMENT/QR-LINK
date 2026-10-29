@@ -102,9 +102,9 @@ public final class MainActivity extends Activity {
         for(int i=0;i<ACCENTS.length;i++)if(ACCENTS[i]==value)return i;
         return -1;
     }
-    /** Solid system-bar background, distinct from the page, including AMOLED. */
+    /** Match the system bar exactly to the selected page background. */
     private int statusShieldColor(){
-        return amoled()?0xff16171c:light()?0xffe6edf4:0xff192a39;
+        return bg;
     }
     private int initialStatusHeight(){
         int id=getResources().getIdentifier("status_bar_height","dimen","android");
@@ -115,16 +115,10 @@ public final class MainActivity extends Activity {
     private void setupStatusBarShield(){
         if(screenHost==null)return;
         if(statusBarShield==null){
+            // Opaque same-color overlay sits under system icons to keep content
+            // out of the cutout, without drawing a separate band or divider.
             statusBarShield=new FrameLayout(this);
             statusBarShield.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
-            View underline=new View(this);
-            underline.setBackgroundColor(amoled()?0xff303039:light()?0xffd0dbe5:0xff314554);
-            statusBarShield.addView(underline,new FrameLayout.LayoutParams(
-                -1,dp(1),Gravity.BOTTOM));
-        }else{
-            View underline=statusBarShield.getChildAt(0);
-            if(underline!=null)underline.setBackgroundColor(
-                amoled()?0xff303039:light()?0xffd0dbe5:0xff314554);
         }
         statusBarShield.setBackgroundColor(statusShieldColor());
         if(statusBarShield.getParent() instanceof ViewGroup)
