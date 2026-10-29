@@ -57,6 +57,8 @@ public final class MainActivity extends Activity {
     private int screenDirection=1;
     private boolean updateNotificationLaunch;
     private TextView backgroundCheckStatus;
+    private LinearLayout homeUpdatePanel;
+    private TextView homeUpdateVersion;
     private final Runnable startupUpdateTask=()->{
         if(!isFinishing()&&!isDestroyed())checkOtaQuietly();
     };
@@ -208,6 +210,7 @@ public final class MainActivity extends Activity {
         super.onResume();current=new WeakReference<>(this);
         handler.removeCallbacks(ticker);if(!emergency)handler.post(ticker);
         updateBackgroundCheckStatus();
+        refreshHomeUpdateCard(false);
         handler.removeCallbacks(startupUpdateTask);
         if(updateNotificationLaunch){
             updateNotificationLaunch=false;
@@ -486,6 +489,7 @@ public final class MainActivity extends Activity {
         theme();lastQr="";status=null;progress=null;progressText=null;transferName=null;transferPercent=null;transferSize=null;transferRate=null;pairLabel=null;queueLabel=null;
         qrImage=null;receiveHint=null;receiveCaption=null;networkBadge=null;
         backgroundCheckStatus=null;
+        homeUpdatePanel=null;homeUpdateVersion=null;
         scroller=new ScrollView(this);scroller.setFillViewport(true);scroller.setClipToPadding(false);
         scroller.setBackgroundColor(bg);scroller.setVerticalScrollBarEnabled(false);
         // Keep the window background identical to the screen during navigation and
@@ -586,12 +590,51 @@ public final class MainActivity extends Activity {
         TextView tag=text("●  ПРЯМОЕ ПОДКЛЮЧЕНИЕ ПО QR",11,accent,true);
         tag.setLetterSpacing(.05f);hero.addView(tag);
         space(hero,7);hero.addView(text("Выберите действие, остальное QR LINK сделает сам.",14,muted,false));
+        homeUpdatePanel=panel("Доступно обновление","Новая версия QR LINK готова к установке.","receive");
+        homeUpdateVersion=text("",14,accent,true);
+        margin(homeUpdatePanel,homeUpdateVersion,12);
+        button(homeUpdatePanel,"receive","ОБНОВИТЬ QR LINK",true,this::checkForUpdates);
+        refreshHomeUpdateCard(false);
         LinearLayout send=panel("Отправить файлы","Сканируйте QR получателя и выберите файлы или папки.","send");
         button(send,"send","ОТПРАВИТЬ",true,()->navigate(SEND));
         LinearLayout recv=panel("Получить файлы","Покажите свой QR. Устройство готово принимать файлы.","receive");
         button(recv,"receive","ПОЛУЧИТЬ",true,()->{
             navigate(RECEIVE);if(!TransferService.isReceiving)beginReceive();
         });
+    }
+    /**
+     * The available release is cached after a successful startup/background check.
+     * Update the home card in place, without rebuilding the current screen
+     * or interfering with Send/Receive views and their running transfers.
+     */
+    private void refreshHomeUpdateCard(boolean animate){
+        if(homeUpdatePanel==null||homeUpdateVersion==null)return;
+        long available=prefs().getLong(OtaUpdateSchedule.PREF_AVAILABLE_CODE,0L);
+        long installed;
+        try{
+            installed=getPackageManager().getPackageInfo(getPackageName(),0).getLongVersionCode();
+        }catch(Exception ignored){return;}
+        if(available<=installed){
+            homeUpdatePanel.animate().cancel();
+            homeUpdatePanel.setVisibility(View.GONE);
+            return;
+        }
+        String name=prefs().getString(OtaUpdateSchedule.PREF_AVAILABLE_NAME,"");
+        homeUpdateVersion.setText(name.isEmpty()?"Новая версия":("Версия "+name));
+        if(homeUpdatePanel.getVisibility()!=View.VISIBLE){
+            homeUpdatePanel.animate().cancel();
+            homeUpdatePanel.setVisibility(View.VISIBLE);
+            if(animate&&motion()){
+                homeUpdatePanel.setAlpha(0f);
+                homeUpdatePanel.setTranslationY(dp(8));
+                homeUpdatePanel.animate().alpha(1f).translationY(0f)
+                    .setDuration(235L)
+                    .setInterpolator(new DecelerateInterpolator(1.5f)).start();
+            }else{
+                homeUpdatePanel.setAlpha(1f);
+                homeUpdatePanel.setTranslationY(0f);
+            }
+        }
     }
     /** One premium progress panel shared by Send and Receive screens. */
     private void liveStatus(){
@@ -853,12 +896,12 @@ public final class MainActivity extends Activity {
         slider.setProgressBackgroundTintList(ColorStateList.valueOf(stroke));
         slider.setSplitTrack(false);
         slider.setProgress(initial);
-        sliderCard.addView(slider,new LinearLayout.LayoutParams(-1,dp(46)));
         TextView selectedLabel=text(labels[initial],15,accent,true);
         selectedLabel.setGravity(Gravity.CENTER);
         LinearLayout.LayoutParams captionParams=new LinearLayout.LayoutParams(-1,-2);
-        captionParams.setMargins(0,dp(6),0,dp(3));
+        captionParams.setMargins(0,dp(3),0,dp(6));
         sliderCard.addView(selectedLabel,captionParams);
+        sliderCard.addView(slider,new LinearLayout.LayoutParams(-1,dp(46)));
         slider.setContentDescription("Частота проверки обновлений");
         slider.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener(){
             private int last=slider.getProgress();
@@ -940,9 +983,10 @@ public final class MainActivity extends Activity {
             @Override public void status(String message){}
             @Override public void release(UpdateManager.Release r,boolean newer){
                 if(isFinishing()||isDestroyed())return;
-                if(!newer){offerStoredBackgroundUpdate();return;}
+                if(!newer){refreshHomeUpdateCard(false);offerStoredBackgroundUpdate();return;}
                 prefs().edit().putLong(OtaUpdateSchedule.PREF_AVAILABLE_CODE,r.versionCode)
                     .putString(OtaUpdateSchedule.PREF_AVAILABLE_NAME,r.versionName).apply();
+                refreshHomeUpdateCard(true);
                 OtaProgressDialog offer=new OtaProgressDialog(MainActivity.this);
                 offer.show();offer.offer(r.versionName,()->downloadAndInstallUpdate(r,offer));
             }
