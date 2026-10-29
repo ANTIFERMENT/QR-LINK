@@ -1,0 +1,218 @@
+package PACKAGE_PLACEHOLDER;
+
+import android.app.Activity;
+import android.app.DownloadManager;
+import android.content.Context;
+import android.content.Intent;
+import android.content.SharedPreferences;
+import android.content.pm.PackageInfo;
+import android.net.Uri;
+import android.os.Build;
+import android.os.Environment;
+import android.os.Handler;
+import android.os.Looper;
+import android.provider.Settings;
+import org.json.JSONObject;
+import java.io.ByteArrayOutputStream;
+import java.io.InputStream;
+import java.net.HttpURLConnection;
+import java.net.URL;
+import java.security.MessageDigest;
+import java.util.Locale;
+
+/** Android-only OTA helper. A system installer confirmation may still be required. */
+public final class QrLinkOta {
+    public static final String MANIFEST_URL =
+        "https://github.com/ANTIFERMENT/QR-LINK/releases/latest/download/update.json";
+    private static final String STORAGE = "qr_link_ota";
+    private static final String DOWNLOAD_ID = "download_id";
+    private static final String SHA = "sha256";
+    private static final String CODE = "version_code";
+    private static final Handler MAIN = new Handler(Looper.getMainLooper());
+    private QrLinkOta() {}
+
+    public interface Callback {
+        void onStatus(String text);
+        void onUpdate(Update update);
+        void onError(String message);
+    }
+
+    public static final class Update {
+        public final String packageName;
+        public final String versionName;
+        public final long versionCode;
+        public final String apkUrl;
+        public final String sha256;
+        public final long sizeBytes;
+        public final String notes;
+
+        Update(JSONObject json) throws Exception {
+            if (json.getInt("schema") != 1) throw new Exception("Неподдерживаемый OTA-манифест");
+            packageName = json.getString("packageName");
+            versionName = json.getString("versionName");
+            versionCode = json.getLong("versionCode");
+            apkUrl = json.getString("apkUrl");
+            sha256 = json.getString("sha256").toLowerCase(Locale.ROOT);
+            sizeBytes = json.getLong("sizeBytes");
+            notes = json.optString("notes", "");
+            if (versionCode < 1 || sizeBytes <= 0 || !sha256.matches("[a-f0-9]{64}"))
+                throw new Exception("Некорректная контрольная информация OTA");
+            Uri u = Uri.parse(apkUrl);
+            if (!"https".equalsIgnoreCase(u.getScheme())
+                || !"github.com".equalsIgnoreCase(u.getHost())
+                || u.getPath() == null
+                || !u.getPath().matches("/ANTIFERMENT/QR-LINK/releases/download/v[^/]+/QR-LINK[.]apk"))
+                throw new Exception("Недоверенный адрес APK");
+        }
+    }
+
+    private static void status(Callback cb, String s) {
+        if (cb != null) MAIN.post(() -> cb.onStatus(s));
+    }
+    private static void error(Callback cb, String s) {
+        if (cb != null) MAIN.post(() -> cb.onError(s));
+    }
+    private static long installedCode(Context c) throws Exception {
+        PackageInfo p = c.getPackageManager().getPackageInfo(c.getPackageName(), 0);
+        return Build.VERSION.SDK_INT >= 28 ? p.getLongVersionCode() : p.versionCode;
+    }
+
+    public static void checkForUpdates(Context context, Callback cb) {
+        final Context app = context.getApplicationContext();
+        status(cb, "Проверка обновлений…");
+        new Thread(() -> {
+            HttpURLConnection connection = null;
+            try {
+                connection = (HttpURLConnection) new URL(MANIFEST_URL).openConnection();
+                connection.setConnectTimeout(12000);
+                connection.setReadTimeout(15000);
+                connection.setRequestProperty("Accept", "application/json");
+                connection.setUseCaches(false);
+                int response = connection.getResponseCode();
+                if (response != 200) throw new Exception("OTA-сервер: HTTP " + response);
+                ByteArrayOutputStream data = new ByteArrayOutputStream();
+                try (InputStream in = connection.getInputStream()) {
+                    byte[] bytes = new byte[8192];
+                    int n;
+                    while ((n = in.read(bytes)) != -1) {
+                        if (data.size() + n > 65536) throw new Exception("Слишком большой манифест");
+                        data.write(bytes, 0, n);
+                    }
+                }
+                Update u = new Update(new JSONObject(data.toString("UTF-8")));
+                if (!app.getPackageName().equals(u.packageName))
+                    throw new Exception("Не совпадает packageName");
+                if (u.versionCode <= installedCode(app)) {
+                    status(cb, "Установлена актуальная версия");
+                } else if (cb != null) {
+                    MAIN.post(() -> cb.onUpdate(u));
+                }
+            } catch (Exception e) {
+                error(cb, "Ошибка проверки: " + e.getMessage());
+            } finally {
+                if (connection != null) connection.disconnect();
+            }
+        }, "QR-LINK-OTA-check").start();
+    }
+
+    /** Android DownloadManager continues downloading while the phone is locked. */
+    public static void download(Context context, Update update, Callback cb) {
+        try {
+            if (!context.getPackageName().equals(update.packageName))
+                throw new Exception("Package mismatch");
+            if (update.versionCode <= installedCode(context))
+                throw new Exception("Эта версия уже установлена");
+            android.net.Uri uri = Uri.parse(update.apkUrl);
+            if (!"https".equalsIgnoreCase(uri.getScheme())
+                || !"github.com".equalsIgnoreCase(uri.getHost()))
+                throw new Exception("Недоверенный источник");
+            DownloadManager dm = (DownloadManager) context.getSystemService(Context.DOWNLOAD_SERVICE);
+            if (dm == null) throw new Exception("DownloadManager недоступен");
+            java.io.File dir = context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS);
+            if (dir == null) throw new Exception("Нет каталога обновлений");
+            java.io.File target = new java.io.File(dir, "qr-link-update.apk");
+            if (target.exists() && !target.delete()) throw new Exception("Нельзя заменить предыдущую загрузку");
+            DownloadManager.Request req = new DownloadManager.Request(uri)
+                .setTitle("QR LINK " + update.versionName)
+                .setDescription("Обновление QR LINK")
+                .setMimeType("application/vnd.android.package-archive")
+                .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
+                .setDestinationInExternalFilesDir(context, Environment.DIRECTORY_DOWNLOADS, "qr-link-update.apk");
+            long id = dm.enqueue(req);
+            context.getSharedPreferences(STORAGE, Context.MODE_PRIVATE).edit()
+                .putLong(DOWNLOAD_ID, id).putString(SHA, update.sha256)
+                .putLong(CODE, update.versionCode).apply();
+            status(cb, "APK загружается в фоне");
+        } catch (Exception e) {
+            error(cb, "Загрузка: " + e.getMessage());
+        }
+    }
+
+    /** Call from onResume() or the Download complete button; verifies SHA before install. */
+    public static void installIfDownloaded(Activity activity, Callback cb) {
+        SharedPreferences p = activity.getSharedPreferences(STORAGE, Context.MODE_PRIVATE);
+        long id = p.getLong(DOWNLOAD_ID, -1L);
+        if (id < 0) return;
+        DownloadManager dm = (DownloadManager) activity.getSystemService(Context.DOWNLOAD_SERVICE);
+        if (dm == null) return;
+        try (android.database.Cursor cursor =
+                 dm.query(new DownloadManager.Query().setFilterById(id))) {
+            if (cursor == null || !cursor.moveToFirst()) return;
+            int state = cursor.getInt(
+                cursor.getColumnIndexOrThrow(DownloadManager.COLUMN_STATUS));
+            if (state == DownloadManager.STATUS_FAILED) {
+                p.edit().remove(DOWNLOAD_ID).apply();
+                error(cb, "Не удалось скачать APK");
+                return;
+            }
+            if (state != DownloadManager.STATUS_SUCCESSFUL) return;
+        }
+        Uri uri = dm.getUriForDownloadedFile(id);
+        if (uri == null) {
+            error(cb, "Не удалось открыть загруженный файл");
+            return;
+        }
+        status(cb, "Проверка SHA-256…");
+        new Thread(() -> {
+            try {
+                MessageDigest sha = MessageDigest.getInstance("SHA-256");
+                try (InputStream in = activity.getContentResolver().openInputStream(uri)) {
+                    if (in == null) throw new Exception("APK недоступен");
+                    byte[] buffer = new byte[65536];
+                    int n;
+                    while ((n = in.read(buffer)) != -1) sha.update(buffer, 0, n);
+                }
+                StringBuilder actual = new StringBuilder();
+                for (byte b : sha.digest()) actual.append(
+                    String.format(Locale.ROOT, "%02x", b & 0xff));
+                if (!actual.toString().equals(p.getString(SHA, "")))
+                    throw new Exception("Контрольная сумма APK не совпадает");
+                if (p.getLong(CODE, 0L) <= installedCode(activity)) {
+                    p.edit().remove(DOWNLOAD_ID).apply();
+                    status(cb, "Версия уже установлена");
+                    return;
+                }
+                MAIN.post(() -> {
+                    try {
+                        if (Build.VERSION.SDK_INT >= 26 &&
+                            !activity.getPackageManager().canRequestPackageInstalls()) {
+                            status(cb, "Разреши установку из QR LINK и вернись в приложение");
+                            activity.startActivity(new Intent(
+                                Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                                Uri.parse("package:" + activity.getPackageName())));
+                            return;
+                        }
+                        Intent intent = new Intent(Intent.ACTION_VIEW);
+                        intent.setDataAndType(uri, "application/vnd.android.package-archive");
+                        intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                        activity.startActivity(intent);
+                    } catch (Exception ex) {
+                        error(cb, "Установщик: " + ex.getMessage());
+                    }
+                });
+            } catch (Exception ex) {
+                error(cb, "Проверка APK: " + ex.getMessage());
+            }
+        }, "QR-LINK-OTA-verify").start();
+    }
+}
