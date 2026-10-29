@@ -6,6 +6,8 @@ on:
     branches: [main]
     paths:
       - 'QR_LINK_SOURCE.zip'
+      - 'scripts/sign_release.py'
+      - 'scripts/make_manifest.py'
       - 'app/**'
       - 'gradle/**'
       - 'gradlew'
@@ -74,36 +76,11 @@ jobs:
             gradle --no-daemon :app:assembleRelease
           fi
 
-      - name: Align, sign and verify APK
+      - name: Sign APK with the permanent official identity
         shell: bash
         env:
-          QR_LINK_KEYSTORE_BASE64: ${{ secrets.QR_LINK_KEYSTORE_BASE64 }}
-          QR_LINK_KEYSTORE_PASSWORD: ${{ secrets.QR_LINK_KEYSTORE_PASSWORD }}
-          QR_LINK_KEY_ALIAS: ${{ secrets.QR_LINK_KEY_ALIAS }}
-          QR_LINK_KEY_PASSWORD: ${{ secrets.QR_LINK_KEY_PASSWORD }}
-        run: |
-          set -euo pipefail
-          for k in QR_LINK_KEYSTORE_BASE64 QR_LINK_KEYSTORE_PASSWORD QR_LINK_KEY_ALIAS QR_LINK_KEY_PASSWORD; do
-            [[ -n "${!k:-}" ]] || { echo "::error::Missing signing Secret: $k"; exit 1; }
-          done
-          printf '%s' "$QR_LINK_KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/qr-link.jks"
-          chmod 600 "$RUNNER_TEMP/qr-link.jks"
-          mapfile -t apks < <(find app/build/outputs/apk/release -type f -name '*.apk' ! -name '*unaligned*' | sort)
-          [[ "${#apks[@]}" -eq 1 ]] || { echo "::error::Expected one release APK, got ${#apks[@]}"; exit 1; }
-          mkdir -p dist
-          ZIPALIGN="$ANDROID_SDK_ROOT/build-tools/36.0.0/zipalign"
-          SIGNER="$ANDROID_SDK_ROOT/build-tools/36.0.0/apksigner"
-          "$ZIPALIGN" -f -p 4 "${apks[0]}" "$RUNNER_TEMP/aligned.apk"
-          "$SIGNER" sign \
-            --ks "$RUNNER_TEMP/qr-link.jks" \
-            --ks-key-alias "$QR_LINK_KEY_ALIAS" \
-            --ks-pass env:QR_LINK_KEYSTORE_PASSWORD \
-            --key-pass env:QR_LINK_KEY_PASSWORD \
-            --out dist/QR-LINK.apk \
-            "$RUNNER_TEMP/aligned.apk"
-          "$SIGNER" verify --verbose --print-certs dist/QR-LINK.apk
-          "$ZIPALIGN" -c -p 4 dist/QR-LINK.apk
-          rm -f "$RUNNER_TEMP/qr-link.jks"
+          QR_LINK_SIGNING_BUNDLE: ${{ secrets.QR_LINK_SIGNING_BUNDLE }}
+        run: python3 scripts/sign_release.py
 
       - name: Generate and validate update.json
         id: metadata
