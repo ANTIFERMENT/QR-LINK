@@ -44,6 +44,11 @@ def main():
             p = PurePosixPath(relative)
             if p.is_absolute() or ".." in p.parts or ":" in relative or "\x00" in relative:
                 fail("unsafe ZIP path")
+            if (relative.startswith(FORBIDDEN) or relative == "local.properties"
+                    or relative.startswith(".gradle/") or "/build/" in relative
+                    or relative.endswith((".jks", ".keystore", ".p12", ".pfx", ".pem", ".key"))):
+                print("Skipping generated, private or repository-managed file:", relative)
+                continue
             if relative.startswith(FORBIDDEN):
                 print("Keeping repository-managed file, skipping:", relative)
                 continue
@@ -69,6 +74,43 @@ def main():
         manifest = ROOT / "app/src/main/AndroidManifest.xml"
         if not manifest.exists():
             fail("AndroidManifest.xml missing after source import")
+    gradle = ROOT / "app/build.gradle"
+    gradle_kts = ROOT / "app/build.gradle.kts"
+    namespace = None
+    for path in (gradle, gradle_kts):
+        if path.exists():
+            build_text = path.read_text(encoding="utf-8", errors="replace")
+            for pattern in (r'\bnamespace\s*(?:=\s*)?["\']([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+)["\']',
+                            r'\bapplicationId\s*(?:=\s*)?["\']([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+)["\']'):
+                match = re.search(pattern, build_text)
+                if match:
+                    namespace = match.group(1)
+                    break
+        if namespace:
+            break
+    manifest = ROOT / "app/src/main/AndroidManifest.xml"
+    xml = manifest.read_text(encoding="utf-8", errors="replace")
+    for permission in ("android.permission.INTERNET", "android.permission.REQUEST_INSTALL_PACKAGES"):
+        if permission not in xml:
+            tag = re.search(r"<manifest\b[^>]*>", xml, flags=re.DOTALL)
+            if not tag:
+                fail("Invalid AndroidManifest.xml")
+            xml = xml[:tag.end()] + '\n    <uses-permission android:name="' + permission + '"/>' + xml[tag.end():]
+    manifest.write_text(xml, encoding="utf-8")
+    existing = list((ROOT / "app/src/main/java").rglob("QrLinkOta.java"))
+    if existing:
+        print("Existing OTA class detected; preserving project version:", existing[0])
+    elif namespace:
+        template = ROOT / "ota/QrLinkOta.java.template"
+        if template.is_file():
+            target = ROOT / "app/src/main/java" / Path(*namespace.split(".")) / "QrLinkOta.java"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(
+                template.read_text(encoding="utf-8").replace("PACKAGE_PLACEHOLDER", namespace),
+                encoding="utf-8")
+            print("Inserted OTA engine into package:", namespace)
+    else:
+        print("WARNING: No namespace in app/build.gradle; OTA Java engine not injected")
     print("QR LINK Gradle source imported safely")
 
 if __name__ == "__main__":
