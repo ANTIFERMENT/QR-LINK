@@ -97,7 +97,7 @@ def main():
                 fail("Invalid AndroidManifest.xml")
             xml = xml[:tag.end()] + '\n    <uses-permission android:name="' + permission + '"/>' + xml[tag.end():]
     manifest.write_text(xml, encoding="utf-8")
-    existing = list((ROOT / "app/src/main/java").rglob("QrLinkOta.java"))
+    existing = list((ROOT / "app/src/main/java").rglob("QrLinkOta.java")) + list((ROOT / "app/src/main/java").rglob("UpdateManager.java"))
     if existing:
         print("Existing OTA class detected; preserving project version:", existing[0])
     elif namespace:
