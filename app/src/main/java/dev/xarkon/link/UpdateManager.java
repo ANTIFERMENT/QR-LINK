@@ -77,23 +77,23 @@ public final class UpdateManager {
         catch(UnknownHostException e){
             if(!caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED))
                 throw new IOException("Сеть подключена, но интернет или DNS недоступны. Проверьте Wi-Fi, мобильные данные и VPN.",e);
-            throw new IOException("Интернет есть, но DNS не находит github.com. Проверьте DNS, блокировщик и VPN.",e);
+            throw new IOException("Интернет доступен, но сервер обновлений не определяется. Проверьте DNS и VPN.",e);
         }
     }
     private static String friendly(Exception e){
-        if(e instanceof UnknownHostException)return "DNS не может определить адрес сервера GitHub. Проверьте интернет, DNS и VPN.";
-        if(e instanceof SocketTimeoutException)return "GitHub не ответил вовремя. Проверьте скорость соединения и попробуйте ещё раз.";
-        if(e instanceof SSLException)return "Ошибка защищённого соединения с GitHub. Проверьте дату, время и настройки VPN.";
-        if(e instanceof ConnectException)return "Не удалось соединиться с GitHub. Сервер или соединение недоступны.";
+        if(e instanceof UnknownHostException)return "Не удаётся определить адрес сервера обновлений. Проверьте интернет, DNS и VPN.";
+        if(e instanceof SocketTimeoutException)return "Сервер обновлений не ответил вовремя. Попробуйте ещё раз.";
+        if(e instanceof SSLException)return "Ошибка защищённого соединения. Проверьте дату, время и настройки VPN.";
+        if(e instanceof ConnectException)return "Не удалось подключиться к серверу обновлений.";
         String s=e.getMessage();
         return s==null||s.trim().isEmpty()?"Неизвестная ошибка. Повторите попытку.":s;
     }
     private static void requireOk(HttpsURLConnection c,String purpose)throws IOException{
         int code=c.getResponseCode();
         if(code==200)return;
-        if(code==404)throw new IOException("Файл обновления не найден в GitHub Releases (HTTP 404).");
-        if(code==403||code==429)throw new IOException("GitHub ограничил доступ к загрузке (HTTP "+code+"). Попробуйте позже.");
-        if(code>=500)throw new IOException("Сервер GitHub временно недоступен (HTTP "+code+").");
+        if(code==404)throw new IOException("Файл обновления не найден на сервере (HTTP 404).");
+        if(code==403||code==429)throw new IOException("Сервер временно ограничил загрузку (HTTP "+code+"). Попробуйте позже.");
+        if(code>=500)throw new IOException("Сервер обновлений временно недоступен (HTTP "+code+").");
         throw new IOException(purpose+": сервер ответил HTTP "+code);
     }
     private static HttpsURLConnection connection(String url)throws IOException{
@@ -105,29 +105,30 @@ public final class UpdateManager {
         h.setRequestProperty("User-Agent","QR-LINK-Updater/1.0");
         return h;
     }
+    /** Shared strictly authenticated manifest lookup for foreground and scheduled checks. */
+    public static Release fetchLatest(Context context)throws Exception{
+        internetReady(context);
+        HttpsURLConnection c=connection(MANIFEST_URL);
+        try{
+            requireOk(c,"Проверка обновления");
+            ByteArrayOutputStream memory=new ByteArrayOutputStream();
+            try(InputStream in=c.getInputStream()){
+                byte[] b=new byte[8192];int n;
+                while((n=in.read(b))!=-1){
+                    if(memory.size()+n>64*1024)throw new IOException("Ответ сервера слишком большой.");
+                    memory.write(b,0,n);
+                }
+            }
+            try{return new Release(new JSONObject(memory.toString("UTF-8")));}
+            catch(org.json.JSONException bad){throw new IOException("Некорректные данные обновления.",bad);}
+        }finally{c.disconnect();}
+    }
     public static void check(Activity activity,String manifestUrl,Callback cb){
         new Thread(()->{
             try{
-                if(!MANIFEST_URL.equals(manifestUrl))throw new IOException("Источник OTA изменён. Используется только официальный GitHub.");
-                activity.runOnUiThread(()->cb.status("Проверяем интернет…"));
-                internetReady(activity);
-                activity.runOnUiThread(()->cb.status("Проверяем GitHub…"));
-                HttpsURLConnection c=connection(MANIFEST_URL);
-                JSONObject json;
-                try{
-                    requireOk(c,"Проверка обновления");
-                    ByteArrayOutputStream memory=new ByteArrayOutputStream();
-                    try(InputStream in=c.getInputStream()){
-                        byte[] b=new byte[8192];int n;
-                        while((n=in.read(b))!=-1){
-                            if(memory.size()+n>64*1024)throw new IOException("Ответ сервера слишком большой.");
-                            memory.write(b,0,n);
-                        }
-                    }
-                    try{json=new JSONObject(memory.toString("UTF-8"));}
-                    catch(org.json.JSONException bad){throw new IOException("GitHub вернул некорректный файл обновления.",bad);}
-                }finally{c.disconnect();}
-                Release info=new Release(json);
+                if(!MANIFEST_URL.equals(manifestUrl))throw new IOException("Недоверенный источник обновления.");
+                activity.runOnUiThread(()->cb.status("Проверяем интернет и сервер…"));
+                Release info=fetchLatest(activity.getApplicationContext());
                 long installed=activity.getPackageManager().getPackageInfo(activity.getPackageName(),0).getLongVersionCode();
                 activity.runOnUiThread(()->cb.release(info,info.versionCode>installed));
             }catch(Exception e){
@@ -156,7 +157,7 @@ public final class UpdateManager {
                     long serverLength=c.getContentLengthLong();
                     if(serverLength>MAX_APK)throw new IOException("Слишком большой APK.");
                     if(r.sizeBytes>0&&serverLength>0&&serverLength!=r.sizeBytes)
-                        throw new IOException("GitHub вернул файл другого размера.");
+                        throw new IOException("Сервер вернул файл другого размера.");
                     total=r.sizeBytes>0?r.sizeBytes:serverLength;
                     final long visibleTotal=total;
                     activity.runOnUiThread(()->cb.progress(0L,visibleTotal));

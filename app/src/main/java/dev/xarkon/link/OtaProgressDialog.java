@@ -143,7 +143,7 @@ public final class OtaProgressDialog {
         if(received<0)return;
         rotating(false);bar.setIndeterminate(total<=0);
         label.setText("Загрузка обновления");
-        details.setText("APK загружается с GitHub");
+        details.setText("Загрузка защищённого обновления");
         primary.setVisibility(View.GONE);
         if(numberAnim!=null)numberAnim.cancel();
         final long start=total==lastTotal?lastBytes:0;

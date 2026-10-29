@@ -50,6 +50,9 @@ public final class MainActivity extends Activity {
     private int page=HOME,accent,bg,card,fg,muted,stroke,buttonBg,soft,subtle;
     private boolean navigating,emergency,suppressEntranceAnimations;
     private ScrollView scroller;
+    private FrameLayout screenHost;
+    private boolean screenTransition;
+    private int screenDirection=1;
     private LinearLayout content,root;
     private TextView status,progressText,queueLabel,pairLabel,receiveHint,receiveCaption,networkBadge;
     private TextView transferName,transferPercent,transferSize,transferRate;
@@ -134,7 +137,10 @@ public final class MainActivity extends Activity {
             if(y>0)scroller.post(()->scroller.scrollTo(0,y));
         }
         incomingShare(getIntent());
-        handler.postDelayed(this::checkOtaQuietly,2500L);
+        OtaUpdateSchedule.configure(this);
+        if(prefs().getBoolean(OtaUpdateSchedule.PREF_ON_LAUNCH,true))
+            handler.postDelayed(this::checkOtaQuietly,2400L);
+        else handler.postDelayed(this::offerStoredBackgroundUpdate,1300L);
     }
     @Override protected void onSaveInstanceState(Bundle state){
         state.putInt("page",page);
@@ -403,6 +409,7 @@ public final class MainActivity extends Activity {
             Button diag=new Button(this);diag.setText("Открыть диагностику");
             diag.setOnClickListener(v->{Intent i=new Intent(this,RecoveryActivity.class);
                 i.putExtra("show",true);startActivity(i);finish();});fallback.addView(diag);
+            screenHost=null;
             setContentView(fallback);
         }catch(Throwable fail){throw new RuntimeException("QR LINK recovery screen failed",fail);}
     }
@@ -416,9 +423,18 @@ public final class MainActivity extends Activity {
         getWindow().setBackgroundDrawable(new android.graphics.drawable.ColorDrawable(bg));
         UiMotion.applySafeInsets(this,scroller,dp(12),dp(7));
         root=column();root.setPadding(dp(19),dp(16),dp(19),dp(25));scroller.addView(root);
-        setContentView(scroller);
-        // Configure bars only AFTER a root view has been installed.
-        UiMotion.systemBars(this, light());
+        if(screenHost==null){
+            screenHost=new FrameLayout(this);
+            screenHost.setBackgroundColor(bg);
+            setContentView(screenHost);
+        }else screenHost.setBackgroundColor(bg);
+        final View outgoing=screenHost.getChildCount()>0
+            ?screenHost.getChildAt(screenHost.getChildCount()-1):null;
+        final boolean swap=screenTransition&&outgoing!=null&&motion()&&!suppressEntranceAnimations;
+        screenTransition=false;
+        if(!swap)screenHost.removeAllViews();
+        screenHost.addView(scroller,new FrameLayout.LayoutParams(-1,-1));
+        UiMotion.systemBars(this,light());
         // The initial call may be too early; repeat when the view is attached.
         scroller.post(scroller::requestApplyInsets);
         LinearLayout top=row();top.setMinimumHeight(dp(56));root.addView(top);
@@ -449,6 +465,23 @@ public final class MainActivity extends Activity {
         else if(page==SETTINGS)settingsPage();else if(page==HISTORY)historyPage();else ftpPage();
         updateDynamic();
         emergency=false;
+        if(swap){
+            final ScrollView incoming=scroller;
+            final int direction=screenDirection;
+            incoming.setAlpha(0f);
+            incoming.setTranslationX(dp(22)*direction);
+            incoming.setScaleX(.985f);incoming.setScaleY(.985f);
+            outgoing.animate().cancel();
+            outgoing.animate().alpha(.45f).translationX(-dp(16)*direction)
+                .setDuration(235).setInterpolator(new DecelerateInterpolator(1.3f)).start();
+            incoming.animate().alpha(1f).translationX(0f).scaleX(1f).scaleY(1f)
+                .setDuration(280).setInterpolator(new DecelerateInterpolator(1.5f))
+                .withEndAction(()->{
+                    if(screenHost!=null&&outgoing.getParent()==screenHost)
+                        screenHost.removeView(outgoing);
+                    navigating=false;
+                }).start();
+        }else navigating=false;
     }
         private String pageTitle(){switch(page){case SEND:return "ОТПРАВКА ФАЙЛОВ";case RECEIVE:return "ПОЛУЧЕНИЕ ФАЙЛОВ";
         case SETTINGS:return "НАСТРОЙКИ И ВНЕШНИЕ ПРОТОКОЛЫ";case HISTORY:return "ЖУРНАЛ ОПЕРАЦИЙ";
@@ -456,21 +489,13 @@ public final class MainActivity extends Activity {
     private void navigate(int value){
         if(navigating||page==value)return;
         if(value==SETTINGS)expandedSections.clear();
+        final int previous=page;
+        screenDirection=(value==HOME||value==SETTINGS&&previous!=HOME)?-1:1;
+        screenTransition=motion()&&screenHost!=null;
         navigating=true;
-        if(scroller!=null)scroller.animate().cancel();
-        // Build the next screen immediately. Fading the previous ScrollView to zero
-        // exposed the phone's grey default window for one full frame.
         page=value;
-        boolean slide=motion();
-        suppressEntranceAnimations=slide;
-        try{show();}finally{suppressEntranceAnimations=false;navigating=false;}
-        if(slide&&scroller!=null&&!emergency){
-            ScrollView incoming=scroller;
-            incoming.setAlpha(.96f);
-            incoming.setTranslationY(dp(4));
-            incoming.animate().alpha(1f).translationY(0f).setDuration(155)
-                .setInterpolator(new DecelerateInterpolator(1.45f)).start();
-        }
+        suppressEntranceAnimations=screenTransition;
+        try{show();}finally{suppressEntranceAnimations=false;}
     }
     private void home(){
         LinearLayout hero=column();hero.setPadding(dp(18),dp(20),dp(18),dp(18));
@@ -690,6 +715,7 @@ public final class MainActivity extends Activity {
         LinearLayout updater=section("updates","Обновления",
             updatesSubtitle(),"receive",false);
         outlineButton(updater,"check","Проверить обновление",this::checkForUpdates);
+        updatePreferences(updater);
         LinearLayout about=section("about","Информация и безопасность","Версия, протокол, хранение файлов","info",false);
         about.addView(text("QR LINK "+getAppVersion(),16,fg,true));space(about,9);
         about.addView(text("Android 10+  ·  Wi-Fi / Wi-Fi Direct  ·  соединение по QR",13,muted,false));space(about,13);
@@ -698,16 +724,99 @@ public final class MainActivity extends Activity {
         about.addView(text("Режим ShareMe FTP и Android «Поделиться» доступны отдельно. Нативные протоколы SHAREit и ShareMe не эмулируются.",12,muted,false));
         space(about,8);
     }
+    private Switch otaSwitch(LinearLayout parent,String glyph,String title,String detail,
+                             boolean on,java.util.function.Consumer<Boolean> changed){
+        LinearLayout item=row();item.setPadding(dp(7),dp(11),dp(6),dp(11));
+        item.addView(icon(glyph,accent,24));
+        LinearLayout labels=column();labels.setPadding(dp(12),0,dp(8),0);
+        labels.addView(text(title,14,fg,true));space(labels,5);
+        labels.addView(text(detail,12,muted,false));
+        item.addView(labels,new LinearLayout.LayoutParams(0,-2,1));
+        Switch control=new Switch(this);control.setChecked(on);
+        control.setThumbTintList(new ColorStateList(new int[][]{
+            new int[]{android.R.attr.state_checked},new int[]{}},new int[]{accent,muted}));
+        item.addView(control);margin(parent,item,4);
+        control.setOnCheckedChangeListener((button,enabled)->changed.accept(enabled));
+        item.setOnClickListener(click(()->control.setChecked(!control.isChecked())));
+        return control;
+    }
+    private void updatePreferences(LinearLayout parent){
+        otaSwitch(parent,"check","Проверка обновлений при запуске",
+            "При открытии QR LINK",
+            prefs().getBoolean(OtaUpdateSchedule.PREF_ON_LAUNCH,true),
+            enabled->prefs().edit().putBoolean(OtaUpdateSchedule.PREF_ON_LAUNCH,enabled).apply());
+        final LinearLayout frequency=column();
+        otaSwitch(parent,"history","Проверка обновлений в фоне",
+            "Когда приложение не открыто",
+            prefs().getBoolean(OtaUpdateSchedule.PREF_BACKGROUND,false),enabled->{
+                prefs().edit().putBoolean(OtaUpdateSchedule.PREF_BACKGROUND,enabled).apply();
+                OtaUpdateSchedule.configure(this);
+                frequency.animate().cancel();
+                frequency.animate().alpha(enabled?1f:.45f)
+                    .setDuration(175).setInterpolator(new DecelerateInterpolator()).start();
+                setEnabledChildren(frequency,enabled);
+                if(enabled&&android.os.Build.VERSION.SDK_INT>=33&&
+                    checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS)
+                        !=PackageManager.PERMISSION_GRANTED)
+                    requestPermissions(new String[]{android.Manifest.permission.POST_NOTIFICATIONS},1007);
+            });
+        space(parent,7);margin(parent,frequency,8);
+        final String[] labels=OtaUpdateSchedule.INTERVAL_NAMES;
+        final long[] hours=OtaUpdateSchedule.INTERVAL_HOURS;
+        final ArrayList<TextView> tiles=new ArrayList<>();
+        final long chosen=prefs().getLong(OtaUpdateSchedule.PREF_FREQUENCY,24L);
+        margin(frequency,text("ЧАСТОТА ПРОВЕРКИ",11,muted,true),12);
+        for(int start=0;start<labels.length;start+=2){
+            LinearLayout line=row();margin(frequency,line,8);
+            for(int i=start;i<Math.min(start+2,labels.length);i++){
+                final int selected=i;
+                TextView tile=text(labels[i],12,hours[i]==chosen?accent:fg,hours[i]==chosen);
+                tile.setGravity(Gravity.CENTER);tile.setMinHeight(dp(47));
+                tile.setPadding(dp(5),dp(10),dp(5),dp(10));
+                LinearLayout.LayoutParams lp=new LinearLayout.LayoutParams(0,-2,1);
+                lp.setMargins(dp(3),0,dp(3),0);line.addView(tile,lp);
+                tiles.add(tile);
+                interactive(tile,()->{
+                    prefs().edit().putLong(OtaUpdateSchedule.PREF_FREQUENCY,hours[selected]).apply();
+                    OtaUpdateSchedule.configure(this);
+                    for(int k=0;k<tiles.size();k++){
+                        boolean active=hours[k]==hours[selected];
+                        TextView t=tiles.get(k);
+                        t.setBackground(ripple(active?soft:buttonBg,active?accent:stroke,12));
+                        t.setTextColor(active?accent:fg);
+                        t.setTypeface(android.graphics.Typeface.DEFAULT,
+                            active?android.graphics.Typeface.BOLD:android.graphics.Typeface.NORMAL);
+                    }
+                });
+            }
+        }
+        for(int i=0;i<tiles.size();i++){
+            boolean active=hours[i]==chosen;
+            tiles.get(i).setBackground(ripple(active?soft:buttonBg,active?accent:stroke,12));
+        }
+        boolean enabled=prefs().getBoolean(OtaUpdateSchedule.PREF_BACKGROUND,false);
+        frequency.setAlpha(enabled?1f:.45f);
+        setEnabledChildren(frequency,enabled);
+    }
+    private void setEnabledChildren(View v,boolean enabled){
+        v.setEnabled(enabled);
+        if(v instanceof ViewGroup){
+            ViewGroup group=(ViewGroup)v;
+            for(int i=0;i<group.getChildCount();i++)
+                setEnabledChildren(group.getChildAt(i),enabled);
+        }
+    }
     private String getAppVersion(){
         try{return getPackageManager().getPackageInfo(getPackageName(),0).versionName;}
         catch(Exception e){return "—";}
     }
     private void checkOtaQuietly(){
-        if(isFinishing()||isDestroyed())return;
+        if(isFinishing()||isDestroyed()||
+            !prefs().getBoolean(OtaUpdateSchedule.PREF_ON_LAUNCH,true))return;
         long now=System.currentTimeMillis();
-        long last=prefs().getLong("ota_last_auto_check",0L);
-        if(last>0L&&now>=last&&now-last<24L*60L*60L*1000L)return;
-        prefs().edit().putLong("ota_last_auto_check",now).apply();
+        long last=prefs().getLong("ota_last_startup_check",0L);
+        if(last>0L&&now>=last&&now-last<5L*60L*1000L)return;
+        prefs().edit().putLong("ota_last_startup_check",now).apply();
         UpdateManager.check(this,UpdateManager.MANIFEST_URL,new UpdateManager.Callback(){
             @Override public void status(String message){}
             @Override public void release(UpdateManager.Release r,boolean newer){
@@ -719,6 +828,21 @@ public final class MainActivity extends Activity {
             @Override public void error(String message){}
         });
     }
+    private void offerStoredBackgroundUpdate(){
+        if(isFinishing()||isDestroyed())return;
+        long code=prefs().getLong(OtaUpdateSchedule.PREF_AVAILABLE_CODE,0L);
+        long prompted=prefs().getLong("ota_last_prompted_code",0L);
+        long installed;
+        try{installed=getPackageManager().getPackageInfo(getPackageName(),0).getLongVersionCode();}
+        catch(Exception ignored){return;}
+        if(code<=installed||code<=prompted)return;
+        prefs().edit().putLong("ota_last_prompted_code",code).apply();
+        String name=prefs().getString(OtaUpdateSchedule.PREF_AVAILABLE_NAME,"новая версия");
+        OtaProgressDialog offer=new OtaProgressDialog(this);
+        offer.show();offer.offer(name,()->{
+            offer.dismiss();checkForUpdates();
+        });
+    }
     /** One-tap secure OTA, with a single themed dialog through all stages. */
     private void checkForUpdates(){
         if(isFinishing()||isDestroyed())return;
@@ -727,7 +851,7 @@ public final class MainActivity extends Activity {
         beginUpdateCheck(ui);
     }
     private void beginUpdateCheck(OtaProgressDialog ui){
-        ui.stage("Проверяем подключение…","Интернет и доступность GitHub");
+        ui.stage("Проверяем подключение…","Интернет и сервер обновлений");
         UpdateManager.check(this,UpdateManager.MANIFEST_URL,new UpdateManager.Callback(){
             @Override public void status(String message){
                 if(!isFinishing()&&!isDestroyed())ui.stage(message,"Интернет и сервер обновлений");
