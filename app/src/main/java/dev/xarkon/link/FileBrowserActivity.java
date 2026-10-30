@@ -37,6 +37,9 @@ public final class FileBrowserActivity extends Activity {
     // Accessed on the UI thread. Weak references never retain off-screen rows.
     private final HashMap<String,ArrayList<WeakReference<ImageView>>> previewWaiters=new HashMap<>();
     private final LinkedHashMap<String,Entry> selected=new LinkedHashMap<>();
+    // Only the current page is bound to views; selection persists across pages and tabs.
+    private final HashMap<String,TextView> selectionIndicators=new HashMap<>();
+    private final ArrayList<Entry> visibleEntries=new ArrayList<>();
     private final ArrayList<Entry> current=new ArrayList<>();
     private final ArrayDeque<Location> history=new ArrayDeque<>();
     private final HashSet<Integer> permissionPrompted=new HashSet<>();
@@ -132,6 +135,20 @@ public final class FileBrowserActivity extends Activity {
         LinearLayout footer=column();pad(footer,16,12);
         footer.setBackground(shape(card,stroke,16));
         count=label("Ничего не выбрано",13,muted,false);footer.addView(count);
+        LinearLayout selectionTools=new LinearLayout(this);
+        selectionTools.setGravity(Gravity.CENTER_VERTICAL);
+        LinearLayout.LayoutParams toolsParams=new LinearLayout.LayoutParams(-1,dp(40));
+        toolsParams.topMargin=dp(8);footer.addView(selectionTools,toolsParams);
+        TextView selectPage=label("✓  ВЫБРАТЬ СТРАНИЦУ",11,accent,true);
+        selectPage.setGravity(Gravity.CENTER);
+        selectPage.setBackground(shape(bg,stroke,11));
+        LinearLayout.LayoutParams selectParams=new LinearLayout.LayoutParams(0,-1,1);
+        selectParams.rightMargin=dp(6);selectionTools.addView(selectPage,selectParams);
+        selectPage.setOnClickListener(v->selectVisiblePage());
+        TextView clear=label("×  СНЯТЬ ВЫБОР",11,fg,true);
+        clear.setGravity(Gravity.CENTER);clear.setBackground(shape(bg,stroke,11));
+        selectionTools.addView(clear,new LinearLayout.LayoutParams(0,-1,1));
+        clear.setOnClickListener(v->clearSelection());
         action=label("ДОБАВИТЬ В ОЧЕРЕДЬ",15,Color.BLACK,true);
         action.setGravity(Gravity.CENTER);pad(action,12,15);
         LinearLayout.LayoutParams ap=new LinearLayout.LayoutParams(-1,dp(52));
@@ -212,11 +229,11 @@ public final class FileBrowserActivity extends Activity {
         }
         showMessage("Загрузка файлов…",false);
         final int cat=tab;final Uri rootTree=tree;final String doc=folderId;
-        final String mediaFolder=mediaPath;
+        final String mediaFolder=mediaPath;final String displayPath=folderPath;
         io.execute(()->{
             try{
                 ArrayList<Entry> result=cat<3?queryMedia(cat,mediaFolder,false):cat==3?queryApps():
-                    queryDocuments(rootTree,doc);
+                    queryDocuments(rootTree,doc,displayPath);
                 ui.post(()->{if(token!=serial||isFinishing())return;
                     safTruncated=result instanceof Entries&&((Entries)result).truncated;
                     current.clear();current.addAll(result);render();});
@@ -283,7 +300,7 @@ public final class FileBrowserActivity extends Activity {
         }
         return result;
     }
-    private ArrayList<Entry> queryDocuments(Uri rootTree,String doc){
+    private ArrayList<Entry> queryDocuments(Uri rootTree,String doc,String displayPath){
         Entries result=new Entries();
         if(rootTree==null){
             for(UriPermission perm:getContentResolver().getPersistedUriPermissions()){
@@ -317,7 +334,7 @@ public final class FileBrowserActivity extends Activity {
                 e.mime=c.getString(2);e.folder=DocumentsContract.Document.MIME_TYPE_DIR.equals(e.mime);
                 e.size=c.isNull(3)?-1:c.getLong(3);e.date=c.isNull(4)?0:c.getLong(4)/1000;
                 e.tree=rootTree;e.uri=DocumentsContract.buildDocumentUriUsingTree(rootTree,e.docId);
-                e.path=folderPath;
+                e.path=displayPath;
                 ArrayList<Entry> target=e.folder?directories:files;
                 if(target.size()<MAX_QUEUE)target.add(e);
                 else result.truncated=true;
@@ -330,6 +347,7 @@ public final class FileBrowserActivity extends Activity {
     private void render(){
         if(list==null)return;
         list.removeAllViews();
+        selectionIndicators.clear();visibleEntries.clear();
         if(tab==4&&tree==null){
             addWide("+ ОТКРЫТЬ ПАПКУ ЧЕРЕЗ ANDROID",this::pickTree);
             TextView hint=label("Разрешение выдаётся Android один раз. Затем содержимое открывается здесь, в собственном проводнике.",12,muted,false);
@@ -372,7 +390,9 @@ public final class FileBrowserActivity extends Activity {
         int pages=Math.max(1,(rows.size()+MAX_VISIBLE-1)/MAX_VISIBLE);
         page=Math.max(0,Math.min(page,pages-1));
         int from=page*MAX_VISIBLE,to=Math.min(rows.size(),from+MAX_VISIBLE);
-        for(int i=from;i<to;i++)drawRow(rows.get(i));
+        for(int i=from;i<to;i++){
+            Entry entry=rows.get(i);visibleEntries.add(entry);drawRow(entry);
+        }
         if(rows.size()>MAX_VISIBLE){
             TextView position=label("Показаны "+(from+1)+"–"+to+" из "+rows.size()+
                 " · страница "+(page+1)+"/"+pages,12,muted,false);
@@ -415,6 +435,7 @@ public final class FileBrowserActivity extends Activity {
         TextView check=label(checked?"✓":"＋",22,checked?Color.BLACK:accent,true);
         check.setGravity(Gravity.CENTER);check.setBackground(shape(checked?accent:bg,checked?0:stroke,11));
         row.addView(check,new LinearLayout.LayoutParams(dp(39),dp(39)));
+        selectionIndicators.put(e.key(),check);
         check.setOnClickListener(v->toggle(e));
         row.setOnClickListener(v->{if(e.folder)open(e);else toggle(e);});
         row.setOnLongClickListener(v->{toggle(e);return true;});
@@ -471,11 +492,48 @@ public final class FileBrowserActivity extends Activity {
         }
         waiting.add(new WeakReference<>(image));
     }
+    private void refreshIndicator(String key){
+        TextView indicator=selectionIndicators.get(key);
+        if(indicator==null)return;
+        boolean checked=selected.containsKey(key);
+        indicator.setText(checked?"✓":"＋");
+        indicator.setTextColor(checked?Color.BLACK:accent);
+        indicator.setBackground(shape(checked?accent:bg,checked?0:stroke,11));
+    }
     private void toggle(Entry e){
+        if(busy)return;
         String key=e.key();
         if(selected.containsKey(key))selected.remove(key);
-        else selected.put(key,e);
-        updateCount();render();
+        else{
+            if(selected.size()>=MAX_QUEUE){
+                Toast.makeText(this,"Не более 5000 объектов в одной операции",Toast.LENGTH_SHORT).show();
+                return;
+            }
+            selected.put(key,e);
+        }
+        refreshIndicator(key);
+        updateCount();
+        // Do not rebuild up to 60 rows (and restart their thumbnails) per tap.
+    }
+    private void selectVisiblePage(){
+        if(busy)return;
+        boolean capped=false;
+        for(Entry e:visibleEntries){
+            String key=e.key();
+            if(!selected.containsKey(key)){
+                if(selected.size()>=MAX_QUEUE){capped=true;break;}
+                selected.put(key,e);
+            }
+            refreshIndicator(key);
+        }
+        updateCount();
+        if(capped)Toast.makeText(this,"Достигнут предел 5000 объектов",Toast.LENGTH_SHORT).show();
+    }
+    private void clearSelection(){
+        if(busy||selected.isEmpty())return;
+        selected.clear();
+        for(String key:selectionIndicators.keySet())refreshIndicator(key);
+        updateCount();
     }
     private void updateCount(){
         if(count==null)return;
