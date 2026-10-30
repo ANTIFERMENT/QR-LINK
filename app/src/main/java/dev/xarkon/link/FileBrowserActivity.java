@@ -28,7 +28,7 @@ import java.util.concurrent.*;
 /** Permission-aware in-app browser. SAF is used only to grant access to external folders. */
 public final class FileBrowserActivity extends Activity {
     private static final String[] TABS={"Картинки","Видео","Музыка","Приложения","Файлы"};
-    private static final int PICK_TREE=501,MEDIA_PERMISSION=502,MAX_QUEUE=5000,MAX_VISIBLE=220;
+    private static final int PICK_TREE=501,MEDIA_PERMISSION=502,MAX_QUEUE=5000,MAX_VISIBLE=60;
     private final ExecutorService io=Executors.newSingleThreadExecutor();
     private final ExecutorService previews=Executors.newFixedThreadPool(2);
     private final LruCache<String,Bitmap> previewCache=new LruCache<String,Bitmap>(8*1024*1024){
@@ -41,6 +41,8 @@ public final class FileBrowserActivity extends Activity {
     private final ArrayDeque<Location> history=new ArrayDeque<>();
     private final HashSet<Integer> permissionPrompted=new HashSet<>();
     private LinearLayout list,tabs,root;
+    private ScrollView scroll;
+    private int page=0;
     private TextView title,subtitle,count,action,sortButton,empty;
     private EditText search;
     private int accent,bg,card,fg,muted,stroke,tab=0,serial=0,sort=0;
@@ -112,15 +114,15 @@ public final class FileBrowserActivity extends Activity {
         tools.addView(search,new LinearLayout.LayoutParams(0,dp(48),1));
         sortButton=label("↕",22,accent,true);sortButton.setGravity(Gravity.CENTER);
         tools.addView(sortButton,new LinearLayout.LayoutParams(dp(52),dp(48)));
-        sortButton.setOnClickListener(v->{sort=(sort+1)%3;render();Toast.makeText(this,
+        sortButton.setOnClickListener(v->{sort=(sort+1)%3;page=0;render();Toast.makeText(this,
             sort==0?"По имени":sort==1?"По размеру":"По дате",Toast.LENGTH_SHORT).show();});
         root.addView(tools);
         search.addTextChangedListener(new TextWatcher(){
             public void beforeTextChanged(CharSequence s,int start,int c,int after){}
-            public void onTextChanged(CharSequence s,int start,int before,int count){render();}
+            public void onTextChanged(CharSequence s,int start,int before,int count){page=0;render();}
             public void afterTextChanged(Editable e){}
         });
-        ScrollView scroll=new ScrollView(this);scroll.setFillViewport(true);
+        scroll=new ScrollView(this);scroll.setFillViewport(true);
         list=column();list.setPadding(dp(16),dp(3),dp(16),dp(20));
         scroll.addView(list);root.addView(scroll,new LinearLayout.LayoutParams(-1,0,1));
         LinearLayout footer=column();pad(footer,16,12);
@@ -147,7 +149,7 @@ public final class FileBrowserActivity extends Activity {
         }
     }
     private void switchTab(int index){
-        tab=index;tree=null;folderId="";folderPath="";mediaPath="";history.clear();
+        tab=index;page=0;tree=null;folderId="";folderPath="";mediaPath="";history.clear();
         search.setText("");updateTabs();load();
     }
     private boolean isMedia(){return tab<3;}
@@ -194,6 +196,7 @@ public final class FileBrowserActivity extends Activity {
         list.addView(b,lp);b.setOnClickListener(v->action.run());
     }
     private void load(){
+        page=0;
         int token=++serial;
         subtitle.setText(isMedia()?TABS[tab]+(mediaPath.isEmpty()?"":" · "+mediaPath):
             tab==3?"Установленные приложения":
@@ -348,19 +351,31 @@ public final class FileBrowserActivity extends Activity {
                 "В этом разделе пока нет файлов",14,muted,false);
             nothing.setGravity(Gravity.CENTER);pad(nothing,8,35);list.addView(nothing);
         }
-        int shown=0;
-        for(Entry e:rows){
-            if(shown++>=MAX_VISIBLE)break;
-            drawRow(e);
-        }
+        // Only build one page of rows: a 5000-item directory must not create
+        // hundreds of Android Views on every search, selection or tab change.
+        int pages=Math.max(1,(rows.size()+MAX_VISIBLE-1)/MAX_VISIBLE);
+        page=Math.max(0,Math.min(page,pages-1));
+        int from=page*MAX_VISIBLE,to=Math.min(rows.size(),from+MAX_VISIBLE);
+        for(int i=from;i<to;i++)drawRow(rows.get(i));
         if(rows.size()>MAX_VISIBLE){
-            TextView more=label("Показано "+MAX_VISIBLE+" из "+rows.size()+". Уточните поиск для остальных.",12,muted,false);
-            pad(more,12,15);list.addView(more);
+            TextView position=label("Показаны "+(from+1)+"–"+to+" из "+rows.size()+
+                " · страница "+(page+1)+"/"+pages,12,muted,false);
+            position.setGravity(Gravity.CENTER);pad(position,10,14);list.addView(position);
+            if(page>0)addWide("← ПРЕДЫДУЩИЕ",()->changePage(-1));
+            if(page+1<pages)addWide("СЛЕДУЮЩИЕ →",()->changePage(1));
+        }
+        if(tab==4&&tree!=null&&current.size()>=MAX_QUEUE){
+            TextView cap=label("Показаны не более 5000 элементов каталога. Для остальных откройте вложенную папку или предоставьте доступ к более узкому каталогу.",12,muted,false);
+            pad(cap,10,12);list.addView(cap);
         }
         if(isMedia()&&mediaPath.isEmpty()&&current.size()>=MAX_QUEUE){
             TextView cap=label("Показаны последние 5000 файлов. Для более старых используйте выбор папки.",12,muted,false);
             pad(cap,10,12);list.addView(cap);
         }
+    }
+    private void changePage(int delta){
+        page=Math.max(0,page+delta);render();
+        if(scroll!=null)scroll.post(()->scroll.smoothScrollTo(0,0));
     }
     private void drawRow(Entry e){
         LinearLayout row=new LinearLayout(this);row.setGravity(Gravity.CENTER_VERTICAL);

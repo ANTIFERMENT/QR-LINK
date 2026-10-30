@@ -12,6 +12,7 @@ import java.net.*;
 import java.nio.*;
 import java.nio.channels.FileChannel;
 import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.*;
@@ -113,7 +114,7 @@ public final class TransferEngine {
             }
             String path=pieces[1];String method=pieces[0];
             if(method.equals("GET")&&path.equals("/hello")){
-                reply(out,200,"OK",new JSONObject().put("app","XARKON LINK").put("version",1));return;
+                reply(out,200,"OK",new JSONObject().put("app","XARKON LINK").put("version",1).put("sha256",true));return;
             }
             long contentLength;
             try{contentLength=Long.parseLong(heads.getOrDefault("content-length","-1"));}
@@ -146,10 +147,12 @@ public final class TransferEngine {
                     // Android MediaStore descriptor is opened once PER FILE, rather
                     // than once per 8 MiB chunk. All positional writes are independent.
                     FileChannel channel=destination(inc);
+                    MessageDigest checksum=MessageDigest.getInstance("SHA-256");
                     byte[] buffer=new byte[256*1024];
                     while(partial<contentLength){
                         int n=in.read(buffer,0,(int)Math.min(buffer.length,contentLength-partial));
                         if(n<0)throw new EOFException("Соединение оборвалось");
+                        checksum.update(buffer,0,n);
                         ByteBuffer bb=ByteBuffer.wrap(buffer,0,n);
                         while(bb.hasRemaining()){
                             int w=channel.write(bb,start+partial);
@@ -170,7 +173,8 @@ public final class TransferEngine {
                     }
                     if(finished)complete(inc);
                     reportReceive(inc,true);
-                    reply(out,200,"OK",new JSONObject().put("ok",true));return;
+                    reply(out,200,"OK",new JSONObject().put("ok",true)
+                        .put("sha256",hex(checksum.digest())));return;
                 } finally {
                     synchronized(inc){inc.writing.clear(index);}
                     if(partial>0 && !inc.done.get(index)){
@@ -308,14 +312,15 @@ public final class TransferEngine {
     public void send(String host,int port,String userPin,List<FileCatalog.Item> jobs,int lanes)throws Exception{
         JSONObject hello=new JSONObject(Util.http(host,port,userPin,"/hello","GET",null));
         if(!"XARKON LINK".equals(hello.optString("app")))throw new IOException("Это не совместимый приёмник QR LINK");
+        final boolean verifySha=hello.optBoolean("sha256",false);
         for(FileCatalog.Item job:jobs){
             if(Thread.currentThread().isInterrupted())throw new InterruptedException();
             if(job.size<0){FileCatalog.setStatus(context,job.id,"Ошибка: неизвестный размер");events.note("Пропуск: неизвестный размер файла "+job.name);continue;}
-            try{sendOne(host,port,userPin,job,lanes);FileCatalog.setStatus(context,job.id,"Передан");events.note("Отправлено: "+job.name);}
+            try{sendOne(host,port,userPin,job,lanes,verifySha);FileCatalog.setStatus(context,job.id,"Передан");events.note("Отправлено: "+job.name);}
             catch(Exception e){FileCatalog.setStatus(context,job.id,"Ошибка: "+e.getMessage());events.note("Ошибка отправки "+job.name+": "+e.getMessage());}
         }
     }
-    private void sendOne(String host,int port,String userPin,FileCatalog.Item job,int lanes)throws Exception{
+    private void sendOne(String host,int port,String userPin,FileCatalog.Item job,int lanes,boolean verifySha)throws Exception{
         JSONObject offer=new JSONObject().put("id",job.id).put("name",job.name)
             .put("path",job.path).put("mime",job.mime).put("size",job.size);
         JSONObject result=new JSONObject(Util.http(host,port,userPin,"/offer","POST",offer));
@@ -360,7 +365,7 @@ public final class TransferEngine {
                         try{
                             AtomicLong thisAttempt=new AtomicLong();
                             try{
-                                sendChunk(host,port,userPin,job,ix,sharedSource,n->{
+                                sendChunk(host,port,userPin,job,ix,sharedSource,verifySha,n->{
                                     thisAttempt.addAndGet(n);
                                     inFlight.addAndGet(n);
                                     reportSend(job,progress,inFlight,lastReport,false);
@@ -390,41 +395,79 @@ public final class TransferEngine {
         }
         events.progress("Готово: "+job.name,job.size,job.size,Math.max(0,job.size-initial)/Math.max(.001,(Util.now()-start)/1000.0));
     }
-    private void sendChunk(String host,int port,String userPin,FileCatalog.Item job,int index,FileChannel sharedSource,java.util.function.IntConsumer delivered)throws Exception{
+    /** SHA-256 acknowledgement is optional for older receivers (protocol v1 compatible). */
+    private void sendChunk(String host,int port,String userPin,FileCatalog.Item job,int index,
+                           FileChannel sharedSource,boolean verifySha,java.util.function.IntConsumer delivered)throws Exception{
         long offset=(long)index*Util.CHUNK;
         long length=Math.min(Util.CHUNK,job.size-offset);
         URL u=new URL("http",host,port,"/chunk/"+job.id+"/"+index);
         HttpURLConnection con=(HttpURLConnection)u.openConnection();
-        con.setRequestMethod("PUT");con.setDoOutput(true);con.setConnectTimeout(5000);con.setReadTimeout(90000);
-        con.setRequestProperty("X-Xarkon-Key",userPin);
-        con.setFixedLengthStreamingMode(length);con.setRequestProperty("Connection","close");
-        try(OutputStream out=new BufferedOutputStream(con.getOutputStream(),256*1024)){
-            byte[]buf=new byte[256*1024];long rem=length;
-            if(sharedSource!=null){
-                long position=offset;
-                while(rem>0){
-                    ByteBuffer b=ByteBuffer.wrap(buf,0,(int)Math.min(buf.length,rem));
-                    int n=sharedSource.read(b,position);
-                    if(n<=0)throw new EOFException("Не удалось прочитать исходный файл");
-                    out.write(buf,0,n);delivered.accept(n);position+=n;rem-=n;
-                }
-            }else{
-                // Fallback for providers exposing nonseekable streams (e.g. cloud documents).
-                try(InputStream raw=context.getContentResolver().openInputStream(Uri.parse(job.uri))){
-                    if(raw==null)throw new IOException("Нет доступа к файлу");
-                    position(raw,offset);
+        try{
+            con.setRequestMethod("PUT");con.setDoOutput(true);
+            con.setConnectTimeout(5000);con.setReadTimeout(90000);
+            con.setRequestProperty("X-Xarkon-Key",userPin);
+            con.setFixedLengthStreamingMode(length);
+            con.setRequestProperty("Connection","close");
+            MessageDigest checksum=MessageDigest.getInstance("SHA-256");
+            try(OutputStream out=new BufferedOutputStream(con.getOutputStream(),256*1024)){
+                byte[] buf=new byte[256*1024];long rem=length;
+                if(sharedSource!=null){
+                    long position=offset;
                     while(rem>0){
-                        int n=raw.read(buf,0,(int)Math.min(buf.length,rem));
-                        if(n<=0)throw new EOFException("Файл источника укорочен");
-                        out.write(buf,0,n);delivered.accept(n);rem-=n;
+                        ByteBuffer b=ByteBuffer.wrap(buf,0,(int)Math.min(buf.length,rem));
+                        int n=sharedSource.read(b,position);
+                        if(n<=0)throw new EOFException("Не удалось прочитать исходный файл");
+                        checksum.update(buf,0,n);
+                        out.write(buf,0,n);delivered.accept(n);position+=n;rem-=n;
+                    }
+                }else{
+                    // Some document providers expose nonseekable streams.
+                    try(InputStream raw=context.getContentResolver().openInputStream(Uri.parse(job.uri))){
+                        if(raw==null)throw new IOException("Нет доступа к файлу");
+                        position(raw,offset);
+                        while(rem>0){
+                            int n=raw.read(buf,0,(int)Math.min(buf.length,rem));
+                            if(n<=0)throw new EOFException("Файл источника укорочен");
+                            checksum.update(buf,0,n);
+                            out.write(buf,0,n);delivered.accept(n);rem-=n;
+                        }
                     }
                 }
             }
-        }
-        try{int response=con.getResponseCode();if(response!=200){
-                String detail="";try(InputStream e=con.getErrorStream()){if(e!=null)detail=Util.readText(e,4096);}catch(Exception ignored){}
+            int response=con.getResponseCode();
+            if(response!=200){
+                String detail="";
+                try(InputStream err=con.getErrorStream()){
+                    if(err!=null)detail=Util.readText(err,4096);
+                }catch(Exception ignored){}
                 throw new IOException("HTTP "+response+": "+detail);
-            }}finally{con.disconnect();}
+            }
+            JSONObject answer;
+            try(InputStream responseBody=con.getInputStream()){
+                answer=new JSONObject(Util.readText(responseBody,4096));
+            }
+            String remote=answer.optString("sha256","");
+            if(!remote.isEmpty()){
+                if(!remote.matches("[0-9a-fA-F]{64}")||
+                   !remote.equalsIgnoreCase(hex(checksum.digest())))
+                    throw new IOException("Контрольная сумма блока не совпала, повторяем передачу");
+            }else if(verifySha&&!answer.optBoolean("already",false)){
+                throw new IOException("Получатель не подтвердил контрольную сумму блока");
+            }
+        }finally{
+            // Disconnect even when the source stream or a socket write fails.
+            con.disconnect();
+        }
+    }
+    private static String hex(byte[] digest){
+        char[] digits="0123456789abcdef".toCharArray();
+        char[] out=new char[digest.length*2];
+        for(int i=0;i<digest.length;i++){
+            int v=digest[i]&255;
+            out[2*i]=digits[v>>>4];
+            out[2*i+1]=digits[v&15];
+        }
+        return new String(out);
     }
     private void reportSend(FileCatalog.Item job,AtomicLong confirmed,AtomicLong inFlight,
                             AtomicLong lastReport,boolean force){
