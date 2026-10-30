@@ -494,13 +494,14 @@ public final class FileBrowserActivity extends Activity {
                 HashSet<String> used=new HashSet<>();
                 HashMap<String,ArrayList<Entry>> media=new HashMap<>();
                 for(Entry e:items){
-                    if(e.mediaFolder&&!media.containsKey(e.group))
-                        media.put(e.group,queryMedia(Arrays.asList(TABS).indexOf(e.group),e.path,true));
+                    // Index each folder separately, including older items outside the gallery cap.
+                    if(e.mediaFolder&&!media.containsKey(e.key()))
+                        media.put(e.key(),queryMedia(Arrays.asList(TABS).indexOf(e.group),e.path,true));
                 }
                 for(Entry e:items){
                     if(e.folder){
                         if(e.mediaFolder){
-                            for(Entry child:media.get(e.group))
+                            for(Entry child:media.get(e.key()))
                                 if(child.path.startsWith(e.path))addJob(jobs,used,child,child.path);
                         }else{
                             ArrayList<FileCatalog.Item> folderJobs=FileCatalog.fromDocumentFolder(
