@@ -20,7 +20,7 @@ public final class TransferEngine {
     public interface Events { void note(String s); void progress(String s,long current,long total,double speed); }
     private final Context context;
     private final Events events;
-    private final ExecutorService handlers=Executors.newFixedThreadPool(12);
+    private final ExecutorService handlers=Executors.newFixedThreadPool(16);
     private final ConcurrentHashMap<String,Incoming> incoming=new ConcurrentHashMap<>();
     private static final class BadPin {
         long first, lockedUntil;
@@ -55,6 +55,7 @@ public final class TransferEngine {
     public synchronized void stop(){
         alive=false;sessionKey="";try{if(socket!=null)socket.close();}catch(Exception ignored){}
         if(discovery!=null)discovery.close();
+        for(Incoming item:incoming.values())closeDestination(item,false);
     }
     public void shutdown(){stop();handlers.shutdownNow();}
     private void discoveryLoop(){
@@ -140,31 +141,41 @@ public final class TransferEngine {
                     if(inc.writing.get(index)){reply(out,409,"Conflict",error("Блок уже загружается"));return;}
                     inc.writing.set(index);
                 }
+                long partial=0;
                 try {
-                try(ParcelFileDescriptor pfd=context.getContentResolver().openFileDescriptor(inc.uri,"rw")){
-                    if(pfd==null)throw new IOException("Cannot open destination");
-                    try(FileOutputStream fos=new FileOutputStream(pfd.getFileDescriptor());FileChannel channel=fos.getChannel()){
-                        byte[] buffer=new byte[256*1024];long count=0;
-                        while(count<contentLength){
-                            int n=in.read(buffer,0,(int)Math.min(buffer.length,contentLength-count));
-                            if(n<0)throw new EOFException("Соединение оборвалось");
-                            ByteBuffer bb=ByteBuffer.wrap(buffer,0,n);
-                            while(bb.hasRemaining()){
-                                int w=channel.write(bb,start+count);
-                                if(w<=0)throw new IOException("Не удалось записать блок");
-                                count+=w;
-                            }
+                    // Android MediaStore descriptor is opened once PER FILE, rather
+                    // than once per 8 MiB chunk. All positional writes are independent.
+                    FileChannel channel=destination(inc);
+                    byte[] buffer=new byte[256*1024];
+                    while(partial<contentLength){
+                        int n=in.read(buffer,0,(int)Math.min(buffer.length,contentLength-partial));
+                        if(n<0)throw new EOFException("Соединение оборвалось");
+                        ByteBuffer bb=ByteBuffer.wrap(buffer,0,n);
+                        while(bb.hasRemaining()){
+                            int w=channel.write(bb,start+partial);
+                            if(w<=0)throw new IOException("Не удалось записать блок");
+                            partial+=w;
+                            inc.activeBytes.addAndGet(w);
                         }
-                        // Synchronizing every 8 MiB block was a major throughput bottleneck.
-                        // Flush only at final publication, when supported by the file provider.
+                        reportReceive(inc,false);
+                    }
+                    synchronized(inc){
+                        // Replace the in-flight count with a committed chunk atomically
+                        // before reporting. Retries never count unfinished chunks as done.
+                        inc.done.set(index);
+                        inc.activeBytes.addAndGet(-partial);
+                        persist(inc);
+                    }
+                    if(inc.done.cardinality()==inc.count)complete(inc);
+                    reportReceive(inc,true);
+                    reply(out,200,"OK",new JSONObject().put("ok",true));return;
+                } finally {
+                    synchronized(inc){inc.writing.clear(index);}
+                    if(partial>0 && !inc.done.get(index)){
+                        inc.activeBytes.addAndGet(-partial);
+                        reportReceive(inc,true);
                     }
                 }
-                boolean finished;
-                synchronized(inc){inc.done.set(index);persist(inc);finished=inc.done.cardinality()==inc.count;}
-                if(finished)complete(inc);
-                events.progress("Приём: "+inc.name,inc.bytesDone(),inc.size,0);
-                reply(out,200,"OK",new JSONObject().put("ok",true));return;
-                } finally { synchronized(inc){inc.writing.clear(index);} }
             }
             if(method.equals("PUT")&&path.equals("/bench")){
                 if(contentLength<0||contentLength>16L*1024*1024){reply(out,413,"Too Large",error("Maximum 16 MiB"));return;}
@@ -212,8 +223,51 @@ public final class TransferEngine {
         final String id,name,path,mime; final Uri uri;final long size;final int count;final BitSet done=new BitSet();
         boolean completed;
         final BitSet writing=new BitSet();
+        final AtomicLong activeBytes=new AtomicLong();
+        final AtomicLong lastReport=new AtomicLong();
+        ParcelFileDescriptor outputFd;
+        FileOutputStream outputStream;
+        FileChannel outputChannel;
         Incoming(String i,String n,String p,String m,Uri u,long s,int c){id=i;name=n;path=p;mime=m;uri=u;size=s;count=c;}
         long bytesDone(){long sum=0;synchronized(this){for(int i=done.nextSetBit(0);i>=0;i=done.nextSetBit(i+1))sum+=Math.min(Util.CHUNK,size-(long)i*Util.CHUNK);}return sum;}
+    }
+    private FileChannel destination(Incoming inc)throws IOException{
+        synchronized(inc){
+            if(inc.outputChannel!=null&&inc.outputChannel.isOpen())return inc.outputChannel;
+            ParcelFileDescriptor pfd=context.getContentResolver().openFileDescriptor(inc.uri,"rw");
+            if(pfd==null)throw new IOException("Нет доступа к файлу назначения");
+            try{
+                FileOutputStream out=new FileOutputStream(pfd.getFileDescriptor());
+                inc.outputFd=pfd;
+                inc.outputStream=out;
+                inc.outputChannel=out.getChannel();
+                return inc.outputChannel;
+            }catch(Exception e){
+                try{pfd.close();}catch(IOException ignored){}
+                throw new IOException("Не удалось открыть файл назначения",e);
+            }
+        }
+    }
+    private void closeDestination(Incoming inc,boolean flush){
+        synchronized(inc){
+            if(inc.outputChannel!=null){
+                if(flush)try{inc.outputChannel.force(true);}catch(IOException ignored){}
+                try{inc.outputChannel.close();}catch(IOException ignored){}
+            }
+            if(inc.outputStream!=null)try{inc.outputStream.close();}catch(IOException ignored){}
+            if(inc.outputFd!=null)try{inc.outputFd.close();}catch(IOException ignored){}
+            inc.outputChannel=null;inc.outputStream=null;inc.outputFd=null;
+        }
+    }
+    /** Throttled live byte count, not completed-chunk jumps. */
+    private void reportReceive(Incoming inc,boolean force){
+        long now=android.os.SystemClock.elapsedRealtime();
+        if(!force){
+            long previous=inc.lastReport.get();
+            if(now-previous<90L||!inc.lastReport.compareAndSet(previous,now))return;
+        }else inc.lastReport.set(now);
+        long current=inc.bytesDone()+Math.max(0L,inc.activeBytes.get());
+        events.progress("Приём: "+inc.name,Math.min(inc.size,current),inc.size,0);
     }
     private synchronized void persist(Incoming inc){
         try{
@@ -236,8 +290,10 @@ public final class TransferEngine {
     private void complete(Incoming inc){
         synchronized(inc){if(inc.completed)return;inc.completed=true;}
         try{
-            // Persist received data once per completed file, not once per block.
-            try (ParcelFileDescriptor sync=context.getContentResolver().openFileDescriptor(inc.uri,"rw")) {
+            // Flush a single shared descriptor at final publication.
+            // When resumed from a previous process, open once for final sync.
+            if(inc.outputChannel!=null)closeDestination(inc,true);
+            else try (ParcelFileDescriptor sync=context.getContentResolver().openFileDescriptor(inc.uri,"rw")) {
                 if(sync!=null)try{sync.getFileDescriptor().sync();}
                     catch(IOException unsupported){ /* Some document providers don't support fsync. */ }
             }
@@ -269,6 +325,8 @@ public final class TransferEngine {
             if(completed.get(i))already+=Math.min(Util.CHUNK,job.size-(long)i*Util.CHUNK);else todo.add(i);
         }
         AtomicLong progress=new AtomicLong(already);
+        AtomicLong inFlight=new AtomicLong();
+        AtomicLong lastReport=new AtomicLong();
         long start=Util.now(), initial=already;
         events.progress("Отправка: "+job.name,already,job.size,0);
         ExecutorService pool=Executors.newFixedThreadPool(Math.max(1,Math.min(lanes,8)));
@@ -298,13 +356,24 @@ public final class TransferEngine {
                     Exception last=null;
                     for(int attempt=0;attempt<3;attempt++){
                         try{
-                            sendChunk(host,port,userPin,job,ix,sharedSource);
-                            long bytes=Math.min(Util.CHUNK,job.size-(long)ix*Util.CHUNK);
-                            long n=progress.addAndGet(bytes);
-                            double seconds=Math.max(.001,(Util.now()-start)/1000.0);
-                            events.progress("Отправка: "+job.name,n,job.size,(n-initial)/seconds);
-                            return;
-                        }catch(Exception e){last=e;try{Thread.sleep(400L*(attempt+1));}catch(InterruptedException ie){Thread.currentThread().interrupt();break;}}
+                            AtomicLong thisAttempt=new AtomicLong();
+                            try{
+                                sendChunk(host,port,userPin,job,ix,sharedSource,n->{
+                                    thisAttempt.addAndGet(n);
+                                    inFlight.addAndGet(n);
+                                    reportSend(job,progress,inFlight,lastReport,false);
+                                });
+                                long bytes=Math.min(Util.CHUNK,job.size-(long)ix*Util.CHUNK);
+                                progress.addAndGet(bytes);
+                                inFlight.addAndGet(-thisAttempt.get());
+                                reportSend(job,progress,inFlight,lastReport,true);
+                                return;
+                            }catch(Exception failure){
+                                inFlight.addAndGet(-thisAttempt.get());
+                                reportSend(job,progress,inFlight,lastReport,true);
+                                throw failure;
+                            }
+                        }catch(Exception e){last=e;try{Thread.sleep(250L*(attempt+1));}catch(InterruptedException ie){Thread.currentThread().interrupt();break;}}
                     }
                     throw new RuntimeException(last);
                 }));
@@ -319,7 +388,7 @@ public final class TransferEngine {
         }
         events.progress("Готово: "+job.name,job.size,job.size,Math.max(0,job.size-initial)/Math.max(.001,(Util.now()-start)/1000.0));
     }
-    private void sendChunk(String host,int port,String userPin,FileCatalog.Item job,int index,FileChannel sharedSource)throws Exception{
+    private void sendChunk(String host,int port,String userPin,FileCatalog.Item job,int index,FileChannel sharedSource,java.util.function.IntConsumer delivered)throws Exception{
         long offset=(long)index*Util.CHUNK;
         long length=Math.min(Util.CHUNK,job.size-offset);
         URL u=new URL("http",host,port,"/chunk/"+job.id+"/"+index);
@@ -335,7 +404,7 @@ public final class TransferEngine {
                     ByteBuffer b=ByteBuffer.wrap(buf,0,(int)Math.min(buf.length,rem));
                     int n=sharedSource.read(b,position);
                     if(n<=0)throw new EOFException("Не удалось прочитать исходный файл");
-                    out.write(buf,0,n);position+=n;rem-=n;
+                    out.write(buf,0,n);delivered.accept(n);position+=n;rem-=n;
                 }
             }else{
                 // Fallback for providers exposing nonseekable streams (e.g. cloud documents).
@@ -345,7 +414,7 @@ public final class TransferEngine {
                     while(rem>0){
                         int n=raw.read(buf,0,(int)Math.min(buf.length,rem));
                         if(n<=0)throw new EOFException("Файл источника укорочен");
-                        out.write(buf,0,n);rem-=n;
+                        out.write(buf,0,n);delivered.accept(n);rem-=n;
                     }
                 }
             }
@@ -354,6 +423,16 @@ public final class TransferEngine {
                 String detail="";try(InputStream e=con.getErrorStream()){if(e!=null)detail=Util.readText(e,4096);}catch(Exception ignored){}
                 throw new IOException("HTTP "+response+": "+detail);
             }}finally{con.disconnect();}
+    }
+    private void reportSend(FileCatalog.Item job,AtomicLong confirmed,AtomicLong inFlight,
+                            AtomicLong lastReport,boolean force){
+        long now=android.os.SystemClock.elapsedRealtime();
+        if(!force){
+            long previous=lastReport.get();
+            if(now-previous<90L||!lastReport.compareAndSet(previous,now))return;
+        }else lastReport.set(now);
+        long bytes=confirmed.get()+Math.max(0L,inFlight.get());
+        events.progress("Отправка: "+job.name,Math.min(job.size,bytes),job.size,0);
     }
     private static void position(InputStream stream,long offset)throws IOException{
         if(stream instanceof FileInputStream){

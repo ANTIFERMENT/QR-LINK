@@ -229,15 +229,18 @@ public final class TransferService extends Service implements TransferEngine.Eve
         int sep=label.indexOf(": ");
         if(sep>=0){direction=label.substring(0,sep);file=label.substring(sep+2);}
         else if(label.startsWith("Готово: ")){direction="Отправка";file=label.substring(8);}
-        if(!file.equals(sampledFile)){
+        if(!file.equals(sampledFile)||received<sampleBytes){
             sampledFile=file;sampleAt=Util.now();sampleBytes=received;
             bytesPerSecond=0;
         }
         long now=Util.now();
-        if(speed>0)bytesPerSecond=speed;
-        else if(now-sampleAt>=450 && received>=sampleBytes){
-            double instant=(received-sampleBytes)*1000d/Math.max(1,now-sampleAt);
-            bytesPerSecond=bytesPerSecond<=0?instant:(bytesPerSecond*.65+instant*.35);
+        // Both devices use the same moving-window payload metric. The old sender
+        // used average-from-start while the receiver used an instant estimate.
+        if(now-sampleAt>=300){
+            long delta=Math.max(0L,received-sampleBytes);
+            double instant=delta*1000d/Math.max(1L,now-sampleAt);
+            bytesPerSecond=bytesPerSecond<=0?instant:
+                (bytesPerSecond*.72d+instant*.28d);
             sampleAt=now;sampleBytes=received;
         }
         transferDirection=direction;activeFile=file;progress=received;total=max;refresh();
