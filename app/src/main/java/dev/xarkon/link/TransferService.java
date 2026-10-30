@@ -38,6 +38,7 @@ public final class TransferService extends Service implements TransferEngine.Eve
     public static volatile String hotspotSsid="", hotspotPassword="", hotspotHost="";
     public static volatile int hotspotSecurity=0;
     public static volatile String peerState="";
+    public static volatile String systemApHost="";
     public static volatile boolean directReady=false,directStarting=false;
     public static volatile String directMac="",directSsid="",directPass="",directHost="";
     @Override public void onCreate(){super.onCreate();
@@ -84,14 +85,14 @@ public final class TransferService extends Service implements TransferEngine.Eve
         if(in==null)return START_NOT_STICKY;
         String action=in.getAction();
         if(STOP.equals(action)){
-            engine.stop();hotspot.stop();wifiPeer.stop();directWifi.close();resetHotspot();resetDirect();isReceiving=false;receiveKey="";peerState="";activeFile="";transferDirection="";progress=0;total=0;status="Служба остановлена";
+            engine.stop();hotspot.stop();wifiPeer.stop();directWifi.close();resetHotspot();resetDirect();systemApHost="";isReceiving=false;receiveKey="";peerState="";activeFile="";transferDirection="";progress=0;total=0;status="Служба остановлена";
             unlock();stopForeground(STOP_FOREGROUND_REMOVE);stopSelf();MainActivity.changed();return START_NOT_STICKY;
         }
         foreground();
         if(RECEIVE.equals(action)||ROTATE.equals(action)){
             try{
-                if(!WifiState.radioOn(this)){
-                    note("Wi-Fi выключен. Включите Wi-Fi перед получением файлов.");
+                if(!WifiState.localTransferReady(this)){
+                    note("Wi-Fi выключен, точка доступа не обнаружена. Включите Wi-Fi.");
                     return START_NOT_STICKY;
                 }
                 if(ROTATE.equals(action)){engine.stop();isReceiving=false;receiveKey="";}
@@ -101,8 +102,12 @@ public final class TransferService extends Service implements TransferEngine.Eve
                     receiveKey=hex.toString();engine.start(receiveKey);isReceiving=true;
                 }
                 lock();
-                if(directReady){status="Wi-Fi Direct · ожидание отправителя";refresh();}
-                else if(!WifiState.clientConnected(this)){
+                if(directReady){systemApHost="";status="Wi-Fi Direct · ожидание отправителя";refresh();}
+                else if(!WifiState.hostedApAddress(this).isEmpty()){
+                    systemApHost=WifiState.hostedApAddress(this);
+                    status="Системная точка доступа · "+systemApHost+":"+Util.PORT;refresh();
+                }else if(!WifiState.clientConnected(this)){
+                    systemApHost="";
                     status="Создаём Wi-Fi Direct группу...";refresh();
                     if(!directStarting){
                         directStarting=true;directWifi.host(new DirectWifi.HostListener(){
@@ -116,11 +121,14 @@ public final class TransferService extends Service implements TransferEngine.Eve
                             }
                         });
                     }
-                }else{status="Приём по общей Wi-Fi сети · "+Util.ip()+":"+Util.PORT;refresh();}
+                }else{
+                    systemApHost="";
+                    status="Приём по общей Wi-Fi сети · "+Util.ip()+":"+Util.PORT;refresh();
+                }
             }catch(Exception e){note("Не удалось запустить приём: "+e.getMessage());}
         }else if(CONNECT.equals(action)){
-            if(!WifiState.radioOn(this)){
-                note("Wi-Fi выключен. Включите его и повторно отсканируйте QR.");
+            if(!WifiState.localTransferReady(this)){
+                note("Нет локального Wi-Fi. Включите его и повторно отсканируйте QR.");
                 return START_NOT_STICKY;
             }
             String raw=in.getStringExtra("qr");
@@ -145,8 +153,8 @@ public final class TransferService extends Service implements TransferEngine.Eve
                 }
             }catch(Exception e){note("Ошибка QR: "+e.getMessage());}
         }else if(SEND.equals(action))runJob(()->{
-            if(!WifiState.radioOn(this))throw new java.io.IOException(
-                "Wi-Fi выключен. Включите Wi-Fi перед передачей файлов.");
+            if(!WifiState.localTransferReady(this))throw new java.io.IOException(
+                "Локальная Wi-Fi сеть недоступна.");
             android.content.SharedPreferences p=getSharedPreferences("settings",0);
             String host=p.getString("host","").trim();int port=p.getInt("port",Util.PORT);
             String pin=p.getString("key","");int lanes=p.getInt("lanes",4);
@@ -158,8 +166,8 @@ public final class TransferService extends Service implements TransferEngine.Eve
             engine.send(host,port,pin,todo,lanes);
         });
         else if(BENCH.equals(action))runJob(()->{
-            if(!WifiState.radioOn(this))throw new java.io.IOException(
-                "Wi-Fi выключен. Проверка скорости недоступна.");
+            if(!WifiState.localTransferReady(this))throw new java.io.IOException(
+                "Локальная Wi-Fi сеть недоступна.");
             android.content.SharedPreferences p=getSharedPreferences("settings",0);
             String host=p.getString("host","");int port=p.getInt("port",Util.PORT);
             String pin=p.getString("key","");int lanes=p.getInt("lanes",4);
@@ -252,7 +260,7 @@ public final class TransferService extends Service implements TransferEngine.Eve
     private void resetDirect(){directReady=false;directStarting=false;directMac="";directSsid="";
         directPass="";directHost="";MainActivity.changed();}
     private void resetHotspot(){hotspotReady=false;hotspotStarting=false;hotspotSsid="";hotspotPassword="";hotspotHost="";hotspotSecurity=0;MainActivity.changed();}
-    @Override public void onDestroy(){engine.shutdown();hotspot.stop();wifiPeer.stop();directWifi.destroy();resetHotspot();resetDirect();work.shutdownNow();unlock();
+    @Override public void onDestroy(){engine.shutdown();hotspot.stop();wifiPeer.stop();directWifi.destroy();resetHotspot();resetDirect();systemApHost="";work.shutdownNow();unlock();
         isReceiving=false;isBusy=false;receiveKey="";activeFile="";transferDirection="";progress=0;total=0;status="Служба выключена";MainActivity.changed();super.onDestroy();}
     @Override public IBinder onBind(Intent i){return null;}
 }

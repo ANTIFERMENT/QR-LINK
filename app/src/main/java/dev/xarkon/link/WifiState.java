@@ -53,6 +53,33 @@ public final class WifiState {
         }catch(SecurityException ignored){}
         return false;
     }
+    /** Android hotspot hosting is not a Wi-Fi client connection. */
+    public static String hostedApAddress(Context c){
+        if(clientConnected(c))return "";
+        ConnectivityManager cm=(ConnectivityManager)c.getSystemService(Context.CONNECTIVITY_SERVICE);
+        if(cm!=null&&Build.VERSION.SDK_INT>=35)try{
+            for(Network n:cm.getAllNetworks()){
+                NetworkCapabilities cap=cm.getNetworkCapabilities(n);
+                if(cap==null||!cap.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)||
+                    !cap.hasCapability(NetworkCapabilities.NET_CAPABILITY_LOCAL_NETWORK))continue;
+                LinkProperties lp=cm.getLinkProperties(n);
+                if(lp==null)continue;
+                for(android.net.LinkAddress la:lp.getLinkAddresses()){
+                    InetAddress addr=la.getAddress();
+                    if(addr instanceof Inet4Address&&addr.isSiteLocalAddress())return addr.getHostAddress();
+                }
+            }
+        }catch(Exception ignored){}
+        // Many tethering devices leave AP active while STA Wi-Fi is disabled.
+        if(!radioOn(c)){
+            String ip=HotspotSupport.hotspotIp();
+            if(!ip.isEmpty()&&!"127.0.0.1".equals(ip))return ip;
+        }
+        return "";
+    }
+    public static boolean localTransferReady(Context c){
+        return radioOn(c)||!hostedApAddress(c).isEmpty();
+    }
     public static String receiveHint(Context c){
         if(!radioOn(c))return "Wi-Fi выключен. Включите его в настройках телефона.";
         if(clientConnected(c))return "Подключение через общую сеть Wi-Fi.";

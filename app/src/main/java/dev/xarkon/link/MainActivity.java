@@ -1170,8 +1170,9 @@ public final class MainActivity extends Activity {
     }
     private void renderQr(){if(qrImage==null||receiveHint==null)return;
         if(networkBadge!=null){
-            networkBadge.setText(!WifiState.radioOn(this)?"WI-FI ВЫКЛЮЧЕН":
-                TransferService.directReady?"WI-FI DIRECT АКТИВЕН":
+            networkBadge.setText(TransferService.directReady?"WI-FI DIRECT АКТИВЕН":
+                !TransferService.systemApHost.isEmpty()?"СИСТЕМНАЯ ТОЧКА ДОСТУПА":
+                !WifiState.radioOn(this)?"WI-FI ВЫКЛЮЧЕН":
                 TransferService.directStarting?"СОЗДАЁМ WI-FI DIRECT...":
                 WifiState.clientConnected(this)?"ОБЩАЯ СЕТЬ WI-FI":"ОЖИДАЕМ WI-FI DIRECT");
         }
@@ -1186,8 +1187,15 @@ public final class MainActivity extends Activity {
             receiveHint.setText("Создаём группу Wi-Fi Direct...");qrImage.setImageDrawable(null);lastQr="";
             receiveCaption.setText("Wi-Fi должен быть включён, но подключаться к роутеру не нужно. Подождите подтверждения Android.");return;
         }
-        String host=direct?TransferService.directHost:Util.ip();
-        if(!direct&&(!HotspotSupport.hasWifiNetwork(this)||"127.0.0.1".equals(host)||host.isEmpty())){
+        boolean externalAp=!TransferService.systemApHost.isEmpty();
+        String host=direct?TransferService.directHost:(externalAp?TransferService.systemApHost:Util.ip());
+        if(externalAp&&!host.equals(WifiState.hostedApAddress(this))){
+            receiveHint.setText("Системная точка доступа отключилась");
+            qrImage.setImageDrawable(null);lastQr="";
+            receiveCaption.setText("Включите точку доступа и обновите QR-код.");return;
+        }
+        if(!direct&&!externalAp&&(!WifiState.clientConnected(this)||
+            "127.0.0.1".equals(host)||host.isEmpty())){
             receiveHint.setText("Локальная сеть не обнаружена");qrImage.setImageDrawable(null);lastQr="";
             receiveCaption.setText("Создание Wi-Fi Direct не завершилось. "+TransferService.detail+" Если Wi-Fi выключен, включите его, затем обновите QR.");return;
         }
@@ -1202,7 +1210,10 @@ public final class MainActivity extends Activity {
                 }
             }catch(Exception e){receiveHint.setText("Ошибка QR: "+e.getMessage());return;}
         }
-        if(direct){
+        if(externalAp){
+            receiveHint.setText("Системная точка доступа · приём готов");
+            receiveCaption.setText("Подключите второй телефон к этой точке доступа через Android, затем отсканируйте QR LINK. Данные системной точки доступа защищены самой ОС.");
+        }else if(direct){
             receiveHint.setText("Wi-Fi Direct · готово к подключению");
             receiveCaption.setText("Прямая группа «"+TransferService.directSsid+"» создана без интернета. Отправитель сканирует QR, при необходимости подтверждает соединение Android. Приём поддерживает блокировку экрана.");
         }else{
@@ -1253,8 +1264,8 @@ public final class MainActivity extends Activity {
             toast("Соединяем через Wi-Fi Direct. Подтвердите запрос Android, если появится.");
             navigate(SEND);return;
         }
-        if(!WifiState.clientConnected(this)){
-            toast("Для этого QR оба устройства должны быть в одной сети Wi-Fi. Проверьте подключение к роутеру.");
+        if(!WifiState.clientConnected(this)&&WifiState.hostedApAddress(this).isEmpty()){
+            toast("Для этого QR нужен доступ к общей локальной сети. Проверьте Wi-Fi.");
             return;
         }
         new Thread(()->{
@@ -1319,7 +1330,7 @@ public final class MainActivity extends Activity {
         try{startActivity(Intent.createChooser(i,"Передать через SHAREit / ShareMe"));}catch(Exception e){toast(e.getMessage());}
     }
     private boolean ensureWifiEnabled(){
-        if(WifiState.radioOn(this))return true;
+        if(WifiState.localTransferReady(this))return true;
         toast("Включите Wi-Fi. Подключаться к интернету не требуется.");
         try{startActivity(new Intent(Settings.Panel.ACTION_WIFI));}
         catch(Exception e){
@@ -1329,7 +1340,7 @@ public final class MainActivity extends Activity {
         return false;
     }
     private void beginReceive(){
-        if(!WifiState.clientConnected(this)){
+        if(!WifiState.clientConnected(this)&&WifiState.hostedApAddress(this).isEmpty()){
             android.net.wifi.WifiManager wifi=(android.net.wifi.WifiManager)getApplicationContext().getSystemService(WIFI_SERVICE);
             if(wifi!=null&&!wifi.isWifiEnabled()){
                 resumeReceiveAfterWifi=true;
