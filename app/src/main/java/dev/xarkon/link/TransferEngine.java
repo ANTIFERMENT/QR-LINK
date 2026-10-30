@@ -159,14 +159,16 @@ public final class TransferEngine {
                         }
                         reportReceive(inc,false);
                     }
+                    boolean finished;
                     synchronized(inc){
                         // Replace the in-flight count with a committed chunk atomically
                         // before reporting. Retries never count unfinished chunks as done.
                         inc.done.set(index);
                         inc.activeBytes.addAndGet(-partial);
                         persist(inc);
+                        finished=inc.done.cardinality()==inc.count;
                     }
-                    if(inc.done.cardinality()==inc.count)complete(inc);
+                    if(finished)complete(inc);
                     reportReceive(inc,true);
                     reply(out,200,"OK",new JSONObject().put("ok",true));return;
                 } finally {

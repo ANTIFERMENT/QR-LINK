@@ -21,7 +21,7 @@ import com.google.zxing.common.BitMatrix;
 import java.lang.ref.WeakReference;
 import java.util.*;
 
-/** QR LINK 0.3.15: dependable OTA launch, schedule visibility and correct launcher. */
+/** QR LINK 0.3.19: smooth live transfer and explicit Wi-Fi / P2P state checks. */
 public final class MainActivity extends Activity {
     private static final int FILES=41,FOLDER=42,SCAN=43,CAMERA_PERMISSION=44,WIFI_PERMISSION=45,WIFI_SEND_PERMISSION=46;
     private static final int HOME=0,SEND=1,RECEIVE=2,SETTINGS=3,HISTORY=4,FTP=5;
@@ -40,7 +40,12 @@ public final class MainActivity extends Activity {
     private static WeakReference<MainActivity> current=new WeakReference<>(null);
     private final Handler handler=new Handler(Looper.getMainLooper());
     private final Runnable ticker=new Runnable(){@Override public void run(){
-        try{updateDynamic();handler.postDelayed(this,850);}
+        try{
+            updateDynamic();
+            boolean transferring=TransferService.total>0&&
+                TransferService.progress<TransferService.total;
+            handler.postDelayed(this,transferring?55L:300L);
+        }
         catch(RuntimeException | LinkageError failure){
             ((CrashReport)getApplication()).save("MainActivity.ticker",failure);
             handler.removeCallbacks(this);
@@ -65,6 +70,10 @@ public final class MainActivity extends Activity {
     private LinearLayout content,root;
     private TextView status,progressText,queueLabel,pairLabel,receiveHint,receiveCaption,networkBadge;
     private TextView transferName,transferPercent,transferSize,transferRate;
+    private long visibleBytes;
+    private String visibleFile="";
+    private double visibleRate;
+    private long lastQueueUpdate=0;
     private ImageView qrImage;
     private ProgressBar progress;
     private String lastQr="";
@@ -659,6 +668,7 @@ public final class MainActivity extends Activity {
         transferPercent=text("0%",20,accent,true);
         transferPercent.setTypeface(android.graphics.Typeface.create("sans-serif-medium",android.graphics.Typeface.BOLD));
         top.addView(transferPercent);box.addView(top);space(box,14);
+        visibleBytes=0;visibleRate=0;visibleFile="";
         progress=new ProgressBar(this,null,android.R.attr.progressBarStyleHorizontal);
         progress.setMax(1000);progress.setProgressTintList(ColorStateList.valueOf(accent));
         progress.setProgressBackgroundTintList(ColorStateList.valueOf(buttonBg));
@@ -685,6 +695,7 @@ public final class MainActivity extends Activity {
         button(queue,"file","+ ВЫБРАТЬ ФАЙЛЫ И ПАПКИ",true,this::pickFilesOrFolder);
         queueLabel=text("Очередь пуста",13,muted,false);margin(queue,queueLabel,14);
         button(queue,"send","НАЧАТЬ ПЕРЕДАЧУ",true,()->{
+            if(!ensureWifiEnabled())return;
             if(!paired()){toast("Сначала отсканируйте QR-код получателя");return;}
             if(FileCatalog.load(this).isEmpty()){toast("Добавьте файлы или папку");return;}
             start(TransferService.SEND);
@@ -1118,38 +1129,51 @@ public final class MainActivity extends Activity {
     private void updateDynamic(){
         if(status!=null){
             long done=Math.max(0,TransferService.progress), size=Math.max(0,TransferService.total);
+            String active=TransferService.activeFile;
             String phase=TransferService.transferDirection;
+            if(!active.equals(visibleFile)||size<=0||done<visibleBytes){
+                visibleFile=active;visibleBytes=done;visibleRate=0;
+            }else if(motion()&&done>visibleBytes){
+                long gap=done-visibleBytes;
+                visibleBytes+=Math.min(gap,Math.max(128L*1024L,(long)(gap*.33)));
+            }else visibleBytes=done;
+            long shown=Math.min(size,visibleBytes);
             status.setText(size>0&&done>=size?"Файл передан · соединение активно":
                 size>0?("Приём".equals(phase)?"Получение в фоне · экран можно заблокировать":
                     "Отправка в фоне · экран можно заблокировать"):TransferService.status);
-            int permille=size>0?(int)Math.min(1000,done*1000d/size):0;
-            if(progress!=null){
-                if(android.os.Build.VERSION.SDK_INT>=24&&motion())progress.setProgress(permille,true);
-                else progress.setProgress(permille);
-            }
-            if(transferName!=null){
-                String active=TransferService.activeFile;
+            int permille=size>0?(int)Math.min(1000,shown*1000d/size):0;
+            if(progress!=null)progress.setProgress(permille);
+            if(transferName!=null)
                 transferName.setText(active.isEmpty()?"Ожидание передачи":active);
-            }
-            if(transferPercent!=null)transferPercent.setText(size>0?(permille/10)+"%":"0%");
-            if(transferSize!=null)transferSize.setText(Util.readable(done)+" / "+Util.readable(size));
+            if(transferPercent!=null)
+                transferPercent.setText(size>0?(permille/10)+"%":"0%");
+            if(transferSize!=null)
+                transferSize.setText(Util.readable(shown)+" / "+Util.readable(size));
             if(transferRate!=null){
-                double rate=TransferService.bytesPerSecond;
-                if(rate>0&&done<size){
-                    long sec=(long)Math.ceil((size-done)/rate);
-                    transferRate.setText(Util.readable((long)rate)+"/с"+(sec>0&&sec<360000?" · "+(sec<60?sec+" с":(sec/60)+" мин"):""));
+                double actualRate=Math.max(0,TransferService.bytesPerSecond);
+                visibleRate=visibleRate<=0?actualRate:visibleRate*.78+actualRate*.22;
+                if(visibleRate>0&&done<size){
+                    long sec=(long)Math.ceil((size-done)/visibleRate);
+                    transferRate.setText(Util.readable((long)visibleRate)+"/с"+
+                        (sec>0&&sec<360000?" · "+(sec<60?sec+" с":(sec/60)+" мин"):""));
                 }else transferRate.setText(size>0&&done>=size?"ГОТОВО":"");
             }
             if(progressText!=null)progressText.setText(TransferService.detail);
         }
-        if(page==SEND){if(pairLabel!=null)pairLabel.setText(!TransferService.peerState.isEmpty()?TransferService.peerState:(paired()?"QR отсканирован · получатель найден":"Ожидаем сканирование QR-кода"));updateQueue();}
+        if(page==SEND){
+            if(pairLabel!=null)pairLabel.setText(!TransferService.peerState.isEmpty()?TransferService.peerState:
+                (paired()?"QR отсканирован · получатель найден":"Ожидаем сканирование QR-кода"));
+            long now=Util.now();
+            if(now-lastQueueUpdate>=1000){lastQueueUpdate=now;updateQueue();}
+        }
         if(page==RECEIVE)renderQr();
     }
     private void renderQr(){if(qrImage==null||receiveHint==null)return;
         if(networkBadge!=null){
-            networkBadge.setText(TransferService.directReady?"WI-FI DIRECT АКТИВЕН":
+            networkBadge.setText(!WifiState.radioOn(this)?"WI-FI ВЫКЛЮЧЕН":
+                TransferService.directReady?"WI-FI DIRECT АКТИВЕН":
                 TransferService.directStarting?"СОЗДАЁМ WI-FI DIRECT...":
-                HotspotSupport.hasWifiNetwork(this)?"ОБЩАЯ СЕТЬ WI-FI":"СЕТЬ НЕ ОБНАРУЖЕНА");
+                WifiState.clientConnected(this)?"ОБЩАЯ СЕТЬ WI-FI":"ОЖИДАЕМ WI-FI DIRECT");
         }
         String key=TransferService.receiveKey;
         if(!TransferService.isReceiving||key.isEmpty()){
@@ -1217,6 +1241,7 @@ public final class MainActivity extends Activity {
         try{info=Pairing.parse(raw);}catch(Exception e){toast("QR не подходит: "+e.getMessage());return;}
         if(pairLabel!=null)pairLabel.setText("Проверяем QR и соединение...");
         if(info.hotspot){
+            if(!ensureWifiEnabled())return;
             String wifiPermission=Build.VERSION.SDK_INT>=33?Manifest.permission.NEARBY_WIFI_DEVICES:Manifest.permission.ACCESS_FINE_LOCATION;
             if(checkSelfPermission(wifiPermission)!=PackageManager.PERMISSION_GRANTED){
                 pendingHotspotQr=raw;
@@ -1227,6 +1252,10 @@ public final class MainActivity extends Activity {
             i.putExtra("qr",raw);launchService(i);
             toast("Соединяем через Wi-Fi Direct. Подтвердите запрос Android, если появится.");
             navigate(SEND);return;
+        }
+        if(!WifiState.clientConnected(this)){
+            toast("Для этого QR оба устройства должны быть в одной сети Wi-Fi. Проверьте подключение к роутеру.");
+            return;
         }
         new Thread(()->{
             try{
@@ -1289,8 +1318,18 @@ public final class MainActivity extends Activity {
         if(uris.size()==1)i.putExtra(Intent.EXTRA_STREAM,uris.get(0));else i.putParcelableArrayListExtra(Intent.EXTRA_STREAM,uris);
         try{startActivity(Intent.createChooser(i,"Передать через SHAREit / ShareMe"));}catch(Exception e){toast(e.getMessage());}
     }
+    private boolean ensureWifiEnabled(){
+        if(WifiState.radioOn(this))return true;
+        toast("Включите Wi-Fi. Подключаться к интернету не требуется.");
+        try{startActivity(new Intent(Settings.Panel.ACTION_WIFI));}
+        catch(Exception e){
+            try{startActivity(new Intent(Settings.ACTION_WIFI_SETTINGS));}
+            catch(Exception ignored){toast("Откройте настройки Wi-Fi телефона");}
+        }
+        return false;
+    }
     private void beginReceive(){
-        if(!HotspotSupport.hasWifiNetwork(this)){
+        if(!WifiState.clientConnected(this)){
             android.net.wifi.WifiManager wifi=(android.net.wifi.WifiManager)getApplicationContext().getSystemService(WIFI_SERVICE);
             if(wifi!=null&&!wifi.isWifiEnabled()){
                 resumeReceiveAfterWifi=true;
