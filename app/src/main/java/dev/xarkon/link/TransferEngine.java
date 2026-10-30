@@ -137,10 +137,19 @@ public final class TransferEngine {
                 long start=(long)index*Util.CHUNK;
                 long expected=Math.min(Util.CHUNK,inc.size-start);
                 if(contentLength!=expected){reply(out,400,"Bad Request",error("Неверная длина блока"));return;}
+                boolean already;
                 synchronized(inc){
-                    if(inc.done.get(index)){reply(out,200,"OK",new JSONObject().put("already",true));return;}
-                    if(inc.writing.get(index)){reply(out,409,"Conflict",error("Блок уже загружается"));return;}
-                    inc.writing.set(index);
+                    already=inc.done.get(index);
+                    if(!already){
+                        if(inc.writing.get(index)){reply(out,409,"Conflict",error("Блок уже загружается"));return;}
+                        inc.writing.set(index);
+                    }
+                }
+                if(already){
+                    // A lost acknowledgement must still be verified. Hash the
+                    // persisted bytes instead of trusting a previous HTTP 200.
+                    reply(out,200,"OK",new JSONObject().put("already",true)
+                        .put("sha256",storedSha256(inc,index)));return;
                 }
                 long partial=0;
                 try {
@@ -191,6 +200,28 @@ public final class TransferEngine {
             }
             reply(out,404,"Not Found",error("Неизвестный запрос"));
         }catch(Exception e){events.note("Входящее соединение: "+e.getMessage());}
+    }
+    private String storedSha256(Incoming inc,int index)throws Exception{
+        long position=(long)index*Util.CHUNK;
+        long remaining=Math.min(Util.CHUNK,inc.size-position);
+        MessageDigest digest=MessageDigest.getInstance("SHA-256");
+        try(ParcelFileDescriptor fd=context.getContentResolver().openFileDescriptor(inc.uri,"r")){
+            if(fd==null)throw new IOException("Нет доступа к сохранённому блоку");
+            try(FileInputStream stream=new FileInputStream(fd.getFileDescriptor())){
+                FileChannel channel=stream.getChannel();
+                byte[] buf=new byte[256*1024];
+                while(remaining>0){
+                    ByteBuffer bytes=ByteBuffer.wrap(buf,0,(int)Math.min(remaining,buf.length));
+                    int n=channel.read(bytes,position);
+                    if(n<=0)throw new EOFException("Сохранённый блок неполный");
+                    digest.update(buf,0,n);position+=n;remaining-=n;
+                }
+            }
+        }
+        return hex(digest.digest());
+    }
+    private static final class ChecksumMismatchException extends IOException{
+        ChecksumMismatchException(String reason){super(reason);}
     }
     private static void readFully(InputStream in,byte[] buf)throws IOException{
         int pos=0;while(pos<buf.length){int n=in.read(buf,pos,buf.length-pos);if(n<0)throw new EOFException();pos+=n;}
@@ -380,7 +411,14 @@ public final class TransferEngine {
                                 reportSend(job,progress,inFlight,lastReport,true);
                                 throw failure;
                             }
-                        }catch(Exception e){last=e;try{Thread.sleep(250L*(attempt+1));}catch(InterruptedException ie){Thread.currentThread().interrupt();break;}}
+                        }catch(Exception e){
+                            last=e;
+                            // A verified mismatch cannot be repaired by retrying a
+                            // completed block under the same ID: report an error.
+                            if(e instanceof ChecksumMismatchException)break;
+                            try{Thread.sleep(250L*(attempt+1));}
+                            catch(InterruptedException ie){Thread.currentThread().interrupt();break;}
+                        }
                     }
                     throw new RuntimeException(last);
                 }));
@@ -450,9 +488,9 @@ public final class TransferEngine {
             if(!remote.isEmpty()){
                 if(!remote.matches("[0-9a-fA-F]{64}")||
                    !remote.equalsIgnoreCase(hex(checksum.digest())))
-                    throw new IOException("Контрольная сумма блока не совпала, повторяем передачу");
+                    throw new ChecksumMismatchException("Контрольная сумма блока не совпала. Повторно добавьте файл в очередь.");
             }else if(verifySha&&!answer.optBoolean("already",false)){
-                throw new IOException("Получатель не подтвердил контрольную сумму блока");
+                throw new ChecksumMismatchException("Получатель не подтвердил контрольную сумму блока");
             }
         }finally{
             // Disconnect even when the source stream or a socket write fails.
