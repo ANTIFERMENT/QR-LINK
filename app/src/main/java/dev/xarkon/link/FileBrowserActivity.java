@@ -6,6 +6,12 @@ import android.content.*;
 import android.content.pm.*;
 import android.database.Cursor;
 import android.graphics.Color;
+import android.graphics.Bitmap;
+import android.graphics.Canvas;
+import android.graphics.drawable.Drawable;
+import android.util.LruCache;
+import android.util.Size;
+import java.lang.ref.WeakReference;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.net.Uri;
@@ -24,6 +30,12 @@ public final class FileBrowserActivity extends Activity {
     private static final String[] TABS={"Картинки","Видео","Музыка","Приложения","Файлы"};
     private static final int PICK_TREE=501,MEDIA_PERMISSION=502,MAX_QUEUE=5000,MAX_VISIBLE=220;
     private final ExecutorService io=Executors.newSingleThreadExecutor();
+    private final ExecutorService previews=Executors.newFixedThreadPool(2);
+    private final LruCache<String,Bitmap> previewCache=new LruCache<String,Bitmap>(8*1024*1024){
+        @Override protected int sizeOf(String key,Bitmap image){return image.getByteCount();}
+    };
+    // Accessed on the UI thread. Weak references never retain off-screen rows.
+    private final HashMap<String,ArrayList<WeakReference<ImageView>>> previewWaiters=new HashMap<>();
     private final LinkedHashMap<String,Entry> selected=new LinkedHashMap<>();
     private final ArrayList<Entry> current=new ArrayList<>();
     private final ArrayDeque<Location> history=new ArrayDeque<>();
@@ -193,9 +205,10 @@ public final class FileBrowserActivity extends Activity {
         }
         showMessage("Загрузка файлов…",false);
         final int cat=tab;final Uri rootTree=tree;final String doc=folderId;
+        final String mediaFolder=mediaPath;
         io.execute(()->{
             try{
-                ArrayList<Entry> result=cat<3?queryMedia(cat):cat==3?queryApps():
+                ArrayList<Entry> result=cat<3?queryMedia(cat,mediaFolder,false):cat==3?queryApps():
                     queryDocuments(rootTree,doc);
                 ui.post(()->{if(token!=serial||isFinishing())return;
                     current.clear();current.addAll(result);render();});
@@ -205,22 +218,35 @@ public final class FileBrowserActivity extends Activity {
             }
         });
     }
-    private ArrayList<Entry> queryMedia(int cat){
+    /**
+     * A folder query must not silently drop older files because the top-level
+     * gallery only indexes its newest MAX_QUEUE entries. When a whole folder is
+     * selected, reject oversized folders rather than sending an incomplete set.
+     */
+    private ArrayList<Entry> queryMedia(int cat,String prefix,boolean complete){
         ArrayList<Entry> result=new ArrayList<>();
         Uri base=collection(cat);
         String[] cols={MediaStore.MediaColumns._ID,MediaStore.MediaColumns.DISPLAY_NAME,
             MediaStore.MediaColumns.SIZE,MediaStore.MediaColumns.DATE_MODIFIED,
             MediaStore.MediaColumns.MIME_TYPE,MediaStore.MediaColumns.RELATIVE_PATH};
-        try(Cursor c=getContentResolver().query(base,cols,null,null,
+        String selection=prefix.isEmpty()?null:MediaStore.MediaColumns.RELATIVE_PATH+" LIKE ?";
+        String[] args=prefix.isEmpty()?null:new String[]{prefix+"%"};
+        try(Cursor c=getContentResolver().query(base,cols,selection,args,
                 MediaStore.MediaColumns.DATE_MODIFIED+" DESC")){
-            if(c==null)return result;
-            int limit=0;
-            while(c.moveToNext()&&limit++<MAX_QUEUE){
+            if(c==null)throw new IllegalStateException("Медиатека недоступна");
+            while(c.moveToNext()){
+                String path=c.isNull(5)?"":c.getString(5);
+                // Check the actual path too: SQL LIKE treats % and _ as wildcards.
+                if(!path.startsWith(prefix))continue;
+                if(result.size()>=MAX_QUEUE){
+                    if(complete)throw new IllegalStateException(
+                        "В папке больше 5000 файлов. Выберите меньшую папку или отдельные файлы.");
+                    break;
+                }
                 Entry e=new Entry();e.uri=ContentUris.withAppendedId(base,c.getLong(0));
                 e.name=Util.safeName(c.getString(1));e.size=c.isNull(2)?-1:c.getLong(2);
                 e.date=c.isNull(3)?0:c.getLong(3);
-                e.mime=c.getString(4);
-                e.path=c.isNull(5)?"":c.getString(5);
+                e.mime=c.getString(4);e.path=path;
                 result.add(e);
             }
         }
@@ -344,7 +370,8 @@ public final class FileBrowserActivity extends Activity {
         list.addView(row,rp);
         String glyph=e.folder?"folder":tab==0?"image":tab==1?"video":tab==2?"music":tab==3?"apps":"file";
         UiIcon icon=new UiIcon(this,glyph,accent);
-        row.addView(icon,new LinearLayout.LayoutParams(dp(36),dp(36)));
+        if(!e.folder&&(tab==0||tab==1||tab==3))addPreview(row,e,icon,tab);
+        else row.addView(icon,new LinearLayout.LayoutParams(dp(36),dp(36)));
         LinearLayout detail=column();detail.setPadding(dp(10),0,dp(4),0);
         TextView name=label(e.name,14,fg,true);name.setMaxLines(2);name.setEllipsize(TextUtils.TruncateAt.END);
         detail.addView(name);
@@ -360,6 +387,58 @@ public final class FileBrowserActivity extends Activity {
         check.setOnClickListener(v->toggle(e));
         row.setOnClickListener(v->{if(e.folder)open(e);else toggle(e);});
         row.setOnLongClickListener(v->{toggle(e);return true;});
+    }
+    /** Asynchronous, bounded-memory thumbnails; never decode images on the UI thread. */
+    private void addPreview(LinearLayout row,Entry entry,UiIcon placeholder,int category){
+        FrameLayout frame=new FrameLayout(this);
+        frame.setBackground(shape(bg,stroke,11));
+        frame.setClipToOutline(true);
+        row.addView(frame,new LinearLayout.LayoutParams(dp(40),dp(40)));
+        frame.addView(placeholder,new FrameLayout.LayoutParams(-1,-1));
+        ImageView image=new ImageView(this);
+        image.setScaleType(ImageView.ScaleType.CENTER_CROP);
+        image.setVisibility(View.GONE);
+        frame.addView(image,new FrameLayout.LayoutParams(-1,-1));
+        String key=entry.uri.toString();
+        Bitmap cached=previewCache.get(key);
+        if(cached!=null){
+            image.setImageBitmap(cached);image.setVisibility(View.VISIBLE);return;
+        }
+        ArrayList<WeakReference<ImageView>> waiting=previewWaiters.get(key);
+        if(waiting==null){
+            waiting=new ArrayList<>();previewWaiters.put(key,waiting);
+            final Uri uri=entry.uri;
+            previews.execute(()->{
+                Bitmap bitmap=null;
+                try{
+                    if(category==3){
+                        Drawable icon=getPackageManager().getApplicationIcon(uri.getLastPathSegment());
+                        int side=dp(72);
+                        bitmap=Bitmap.createBitmap(side,side,Bitmap.Config.ARGB_8888);
+                        Canvas canvas=new Canvas(bitmap);
+                        icon.setBounds(0,0,side,side);icon.draw(canvas);
+                    }else{
+                        bitmap=getContentResolver().loadThumbnail(uri,new Size(dp(80),dp(80)),null);
+                    }
+                }catch(Exception ignored){
+                    // Keep the category icon when Android denies a thumbnail.
+                }
+                final Bitmap ready=bitmap;
+                ui.post(()->{
+                    if(isDestroyed())return;
+                    if(ready!=null)previewCache.put(key,ready);
+                    ArrayList<WeakReference<ImageView>> listeners=previewWaiters.remove(key);
+                    if(listeners==null||ready==null)return;
+                    for(WeakReference<ImageView> ref:listeners){
+                        ImageView view=ref.get();
+                        if(view!=null&&view.isAttachedToWindow()){
+                            view.setImageBitmap(ready);view.setVisibility(View.VISIBLE);
+                        }
+                    }
+                });
+            });
+        }
+        waiting.add(new WeakReference<>(image));
     }
     private void toggle(Entry e){
         String key=e.key();
@@ -416,7 +495,7 @@ public final class FileBrowserActivity extends Activity {
                 HashMap<String,ArrayList<Entry>> media=new HashMap<>();
                 for(Entry e:items){
                     if(e.mediaFolder&&!media.containsKey(e.group))
-                        media.put(e.group,queryMedia(Arrays.asList(TABS).indexOf(e.group)));
+                        media.put(e.group,queryMedia(Arrays.asList(TABS).indexOf(e.group),e.path,true));
                 }
                 for(Entry e:items){
                     if(e.folder){
@@ -449,5 +528,8 @@ public final class FileBrowserActivity extends Activity {
         it.size=e.size;it.path=Util.safePath(path);it.status="В очереди";
         jobs.add(it);
     }
-    @Override protected void onDestroy(){++serial;io.shutdownNow();super.onDestroy();}
+    @Override protected void onDestroy(){
+        ++serial;io.shutdownNow();previews.shutdownNow();previewWaiters.clear();
+        previewCache.evictAll();super.onDestroy();
+    }
 }
