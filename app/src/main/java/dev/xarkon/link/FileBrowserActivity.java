@@ -26,8 +26,8 @@ public final class FileBrowserActivity extends Activity {
     private final ExecutorService io=Executors.newSingleThreadExecutor();
     private final LinkedHashMap<String,Entry> selected=new LinkedHashMap<>();
     private final ArrayList<Entry> current=new ArrayList<>();
-    private final ArrayList<Entry> mediaFiles=new ArrayList<>();
     private final ArrayDeque<Location> history=new ArrayDeque<>();
+    private final HashSet<Integer> permissionPrompted=new HashSet<>();
     private LinearLayout list,tabs,root;
     private TextView title,subtitle,count,action,sortButton,empty;
     private EditText search;
@@ -188,7 +188,8 @@ public final class FileBrowserActivity extends Activity {
             tree==null?"Разрешённые папки":"Папка · "+folderPath);
         if(isMedia()&&!hasMediaAccess()){
             showMessage("Для просмотра медиа требуется разрешение Android.\nМожно также выбрать папку вручную.",true);
-            requestMedia();return;
+            if(permissionPrompted.add(tab))requestMedia();
+            return;
         }
         showMessage("Загрузка файлов…",false);
         final int cat=tab;final Uri rootTree=tree;final String doc=folderId;
@@ -433,7 +434,7 @@ public final class FileBrowserActivity extends Activity {
                 }
                 if(jobs.isEmpty())throw new IllegalStateException("В выбранных папках нет доступных файлов");
                 FileCatalog.append(this,jobs);
-                ui.post(()->{setResult(RESULT_OK);finish();});
+                ui.post(()->{setResult(RESULT_OK,new Intent());finish();});
             }catch(Exception e){
                 ui.post(()->{busy=false;action.setText("ДОБАВИТЬ В ОЧЕРЕДЬ");
                     updateCount();Toast.makeText(this,"Ошибка: "+e.getMessage(),Toast.LENGTH_LONG).show();});
