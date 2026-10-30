@@ -90,6 +90,10 @@ public final class TransferService extends Service implements TransferEngine.Eve
         foreground();
         if(RECEIVE.equals(action)||ROTATE.equals(action)){
             try{
+                if(!WifiState.radioOn(this)){
+                    note("Wi-Fi выключен. Включите Wi-Fi перед получением файлов.");
+                    return START_NOT_STICKY;
+                }
                 if(ROTATE.equals(action)){engine.stop();isReceiving=false;receiveKey="";}
                 if(!engine.receiving()){
                     byte[] secret=new byte[32];new SecureRandom().nextBytes(secret);
@@ -98,7 +102,7 @@ public final class TransferService extends Service implements TransferEngine.Eve
                 }
                 lock();
                 if(directReady){status="Wi-Fi Direct · ожидание отправителя";refresh();}
-                else if(!HotspotSupport.hasWifiNetwork(this)){
+                else if(!WifiState.clientConnected(this)){
                     status="Создаём Wi-Fi Direct группу...";refresh();
                     if(!directStarting){
                         directStarting=true;directWifi.host(new DirectWifi.HostListener(){
@@ -115,6 +119,10 @@ public final class TransferService extends Service implements TransferEngine.Eve
                 }else{status="Приём по общей Wi-Fi сети · "+Util.ip()+":"+Util.PORT;refresh();}
             }catch(Exception e){note("Не удалось запустить приём: "+e.getMessage());}
         }else if(CONNECT.equals(action)){
+            if(!WifiState.radioOn(this)){
+                note("Wi-Fi выключен. Включите его и повторно отсканируйте QR.");
+                return START_NOT_STICKY;
+            }
             String raw=in.getStringExtra("qr");
             try{
                 Pairing.Info info=Pairing.parse(raw);
@@ -137,15 +145,21 @@ public final class TransferService extends Service implements TransferEngine.Eve
                 }
             }catch(Exception e){note("Ошибка QR: "+e.getMessage());}
         }else if(SEND.equals(action))runJob(()->{
+            if(!WifiState.radioOn(this))throw new java.io.IOException(
+                "Wi-Fi выключен. Включите Wi-Fi перед передачей файлов.");
             android.content.SharedPreferences p=getSharedPreferences("settings",0);
             String host=p.getString("host","").trim();int port=p.getInt("port",Util.PORT);
             String pin=p.getString("key","");int lanes=p.getInt("lanes",4);
             List<FileCatalog.Item> list=FileCatalog.load(this);List<FileCatalog.Item>todo=new ArrayList<>();
             for(FileCatalog.Item it:list)if(!"Передан".equals(it.status))todo.add(it);
             if(todo.isEmpty()){note("Нет файлов для отправки");return;}
+            if(host.isEmpty()||pin.isEmpty())throw new java.io.IOException(
+                "Нет подключённого получателя. Отсканируйте QR заново.");
             engine.send(host,port,pin,todo,lanes);
         });
         else if(BENCH.equals(action))runJob(()->{
+            if(!WifiState.radioOn(this))throw new java.io.IOException(
+                "Wi-Fi выключен. Проверка скорости недоступна.");
             android.content.SharedPreferences p=getSharedPreferences("settings",0);
             String host=p.getString("host","");int port=p.getInt("port",Util.PORT);
             String pin=p.getString("key","");int lanes=p.getInt("lanes",4);
@@ -182,7 +196,7 @@ public final class TransferService extends Service implements TransferEngine.Eve
                 peerState="Подключено по QR · готово к отправке";status=peerState;refresh();
             }catch(Exception e){
                 if(info.direct&&p2pPath){
-                    peerState="Wi-Fi Direct соединён, но сервер не отвечает. Пробуем сетевое подключение";refresh();
+                    peerState="Wi-Fi Direct подключён, но приёмник не отвечает. Пробуем резервный маршрут";refresh();
                     fallbackWifi(info);
                 }else{peerState="Ошибка проверки приёмника: "+e.getMessage();note(peerState);}
             }

@@ -67,7 +67,7 @@ public final class WifiPeerConnector {
                     listener.failure("Соединение с точкой доступа потеряно");
                 }
             };
-            manager.requestNetwork(request,callback,45000);
+            manager.requestNetwork(request,callback,25000);
         }catch(Exception e){listener.failure("Подключение Wi-Fi: "+e.getMessage());}
     }
     /** Uses the existing authenticated receiver's UDP discovery endpoint when DHCP omits its IP. */

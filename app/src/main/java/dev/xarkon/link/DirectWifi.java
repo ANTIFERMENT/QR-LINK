@@ -144,7 +144,7 @@ public final class DirectWifi {
             if(id!=serial||!hosting||hostListener==null)return;
             readGroup(id);
             if(hostListener!=null)scheduleGroupPoll(id,attempt+1);
-        },1100);
+        },750);
     }
     private void readGroup(int id){
         if(id!=serial||!hosting||hostListener==null)return;
@@ -198,9 +198,9 @@ public final class DirectWifi {
                     @Override public void onFailure(int reason){connectDirect(id);}
                 });
                 // P2P discovery is unreliable with certain OEMs: try direct invite as well.
-                main.postDelayed(()->{if(id==serial&&joining&&!connectAttempted)connectDirect(id);},4500);
+                main.postDelayed(()->{if(id==serial&&joining&&!connectAttempted)connectDirect(id);},900);
                 main.postDelayed(()->{if(id==serial&&joining&&joinListener!=null)
-                    joinFail("Не удалось соединиться по Wi-Fi Direct за 30 секунд. Проверьте Wi-Fi и системную геолокацию");},30000);
+                    joinFail("Wi-Fi Direct не ответил. Переходим к резервному подключению.");},15500);
             }catch(Exception e){joinFail("Ошибка подключения Wi-Fi Direct: "+e.getMessage());}
         });
     }

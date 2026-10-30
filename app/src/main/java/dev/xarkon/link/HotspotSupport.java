@@ -19,15 +19,7 @@ public final class HotspotSupport {
     public HotspotSupport(Context context){this.context=context.getApplicationContext();}
     public synchronized boolean active(){return reservation!=null;}
     public synchronized boolean requesting(){return requesting;}
-    public static boolean hasWifiNetwork(Context c){
-        ConnectivityManager cm=(ConnectivityManager)c.getSystemService(Context.CONNECTIVITY_SERVICE);
-        if(cm==null)return false;
-        for(Network n:cm.getAllNetworks()){
-            NetworkCapabilities caps=cm.getNetworkCapabilities(n);
-            if(caps!=null&&caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI))return true;
-        }
-        return false;
-    }
+    public static boolean hasWifiNetwork(Context c){return WifiState.clientConnected(c);}
     public void start(Listener listener){
         if(Build.VERSION.SDK_INT>=33&&context.checkSelfPermission(Manifest.permission.NEARBY_WIFI_DEVICES)!=PackageManager.PERMISSION_GRANTED){
             listener.failure("Разрешите доступ к устройствам поблизости для создания точки Wi-Fi");return;
