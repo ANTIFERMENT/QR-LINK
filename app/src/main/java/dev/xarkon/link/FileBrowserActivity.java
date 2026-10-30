@@ -49,6 +49,7 @@ public final class FileBrowserActivity extends Activity {
     private String mediaPath="",folderPath="",folderId="";
     private Uri tree;
     private boolean busy=false;
+    private boolean safTruncated=false;
     private final Handler ui=new Handler(Looper.getMainLooper());
 
     private static final class Entry {
@@ -58,6 +59,9 @@ public final class FileBrowserActivity extends Activity {
         boolean folder=false,mediaFolder=false;
         String key(){return (folder?"dir:":"file:")+(tree==null?"":tree.toString()+"|")+
             (mediaFolder?group+"|"+path:docId.isEmpty()?uri.toString():docId);}
+    }
+    private static final class Entries extends ArrayList<Entry> {
+        boolean truncated;
     }
     private static final class Location {
         Uri tree;String docId,path,media;
@@ -214,6 +218,7 @@ public final class FileBrowserActivity extends Activity {
                 ArrayList<Entry> result=cat<3?queryMedia(cat,mediaFolder,false):cat==3?queryApps():
                     queryDocuments(rootTree,doc);
                 ui.post(()->{if(token!=serial||isFinishing())return;
+                    safTruncated=result instanceof Entries&&((Entries)result).truncated;
                     current.clear();current.addAll(result);render();});
             }catch(Exception ex){
                 ui.post(()->{if(token==serial&&!isFinishing())
@@ -279,7 +284,7 @@ public final class FileBrowserActivity extends Activity {
         return result;
     }
     private ArrayList<Entry> queryDocuments(Uri rootTree,String doc){
-        ArrayList<Entry> result=new ArrayList<>();
+        Entries result=new Entries();
         if(rootTree==null){
             for(UriPermission perm:getContentResolver().getPersistedUriPermissions()){
                 if(!perm.isReadPermission())continue;
@@ -300,16 +305,25 @@ public final class FileBrowserActivity extends Activity {
             DocumentsContract.Document.COLUMN_LAST_MODIFIED};
         try(Cursor c=getContentResolver().query(children,cols,null,null,null)){
             if(c==null)throw new IllegalStateException("Папка недоступна");
+            // Keep subdirectories navigable even when a provider returns thousands
+            // of files first. Bound memory and mark incomplete listings explicitly.
+            ArrayList<Entry> directories=new ArrayList<>();
+            ArrayList<Entry> files=new ArrayList<>();
+            int scanned=0;
             while(c.moveToNext()){
-                // Do not silently omit files from large SAF directories.
-                if(result.size()>=MAX_QUEUE)throw new IllegalStateException(
-                    "В папке больше 5000 элементов. Выберите меньшую папку.");
+                if(Thread.currentThread().isInterrupted())break;
+                if(++scanned>50000){result.truncated=true;break;}
                 Entry e=new Entry();e.docId=c.getString(0);e.name=Util.safeName(c.getString(1));
                 e.mime=c.getString(2);e.folder=DocumentsContract.Document.MIME_TYPE_DIR.equals(e.mime);
                 e.size=c.isNull(3)?-1:c.getLong(3);e.date=c.isNull(4)?0:c.getLong(4)/1000;
                 e.tree=rootTree;e.uri=DocumentsContract.buildDocumentUriUsingTree(rootTree,e.docId);
-                e.path=folderPath;result.add(e);
+                e.path=folderPath;
+                ArrayList<Entry> target=e.folder?directories:files;
+                if(target.size()<MAX_QUEUE)target.add(e);
+                else result.truncated=true;
             }
+            result.addAll(directories);
+            result.addAll(files);
         }
         return result;
     }
@@ -366,8 +380,8 @@ public final class FileBrowserActivity extends Activity {
             if(page>0)addWide("← ПРЕДЫДУЩИЕ",()->changePage(-1));
             if(page+1<pages)addWide("СЛЕДУЮЩИЕ →",()->changePage(1));
         }
-        if(tab==4&&tree!=null&&current.size()>=MAX_QUEUE){
-            TextView cap=label("Показаны не более 5000 элементов каталога. Для остальных откройте вложенную папку или предоставьте доступ к более узкому каталогу.",12,muted,false);
+        if(tab==4&&tree!=null&&safTruncated){
+            TextView cap=label("Каталог очень большой: показана только часть содержимого. Для полного выбора откройте вложенную папку или предоставьте доступ к более узкому каталогу.",12,muted,false);
             pad(cap,10,12);list.addView(cap);
         }
         if(isMedia()&&mediaPath.isEmpty()&&current.size()>=MAX_QUEUE){

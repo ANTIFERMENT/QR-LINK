@@ -68,8 +68,13 @@ public final class FileCatalog {
                 if(DocumentsContract.Document.MIME_TYPE_DIR.equals(mime))collect(c,tree,childId,path+"/"+name,result,depth+1);
                 else {
                     Uri u=DocumentsContract.buildDocumentUriUsingTree(tree,childId);
-                    Item it=single(c,u,path);it.name=name;
-                    if(!cursor.isNull(3))it.size=cursor.getLong(3);
+                    // The directory cursor already contains all metadata. Avoid
+                    // three extra ContentResolver queries per file (name/size/MIME).
+                    Item it=new Item();
+                    it.id=Util.id();it.uri=u.toString();it.name=name;
+                    it.mime=mime==null||mime.isEmpty()?"application/octet-stream":mime;
+                    it.path=path;it.status="В очереди";
+                    it.size=cursor.isNull(3)?-1:cursor.getLong(3);
                     result.add(it);
                     if(result.size()>5000)throw new IllegalStateException("Больше 5000 файлов");
                 }
