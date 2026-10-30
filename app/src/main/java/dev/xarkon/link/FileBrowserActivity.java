@@ -300,8 +300,10 @@ public final class FileBrowserActivity extends Activity {
             DocumentsContract.Document.COLUMN_LAST_MODIFIED};
         try(Cursor c=getContentResolver().query(children,cols,null,null,null)){
             if(c==null)throw new IllegalStateException("Папка недоступна");
-            int limit=0;
-            while(c.moveToNext()&&limit++<MAX_QUEUE){
+            while(c.moveToNext()){
+                // Do not silently omit files from large SAF directories.
+                if(result.size()>=MAX_QUEUE)throw new IllegalStateException(
+                    "В папке больше 5000 элементов. Выберите меньшую папку.");
                 Entry e=new Entry();e.docId=c.getString(0);e.name=Util.safeName(c.getString(1));
                 e.mime=c.getString(2);e.folder=DocumentsContract.Document.MIME_TYPE_DIR.equals(e.mime);
                 e.size=c.isNull(3)?-1:c.getLong(3);e.date=c.isNull(4)?0:c.getLong(4)/1000;

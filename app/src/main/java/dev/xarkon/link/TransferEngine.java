@@ -344,12 +344,14 @@ public final class TransferEngine {
         JSONObject hello=new JSONObject(Util.http(host,port,userPin,"/hello","GET",null));
         if(!"XARKON LINK".equals(hello.optString("app")))throw new IOException("Это не совместимый приёмник QR LINK");
         final boolean verifySha=hello.optBoolean("sha256",false);
+        int failed=0;
         for(FileCatalog.Item job:jobs){
             if(Thread.currentThread().isInterrupted())throw new InterruptedException();
-            if(job.size<0){FileCatalog.setStatus(context,job.id,"Ошибка: неизвестный размер");events.note("Пропуск: неизвестный размер файла "+job.name);continue;}
+            if(job.size<0){failed++;FileCatalog.setStatus(context,job.id,"Ошибка: неизвестный размер");events.note("Пропуск: неизвестный размер файла "+job.name);continue;}
             try{sendOne(host,port,userPin,job,lanes,verifySha);FileCatalog.setStatus(context,job.id,"Передан");events.note("Отправлено: "+job.name);}
-            catch(Exception e){FileCatalog.setStatus(context,job.id,"Ошибка: "+e.getMessage());events.note("Ошибка отправки "+job.name+": "+e.getMessage());}
+            catch(Exception e){failed++;FileCatalog.setStatus(context,job.id,"Ошибка: "+e.getMessage());events.note("Ошибка отправки "+job.name+": "+e.getMessage());}
         }
+        if(failed>0)throw new IOException("Не удалось передать "+failed+" из "+jobs.size()+" файлов. Проверьте очередь.");
     }
     private void sendOne(String host,int port,String userPin,FileCatalog.Item job,int lanes,boolean verifySha)throws Exception{
         JSONObject offer=new JSONObject().put("id",job.id).put("name",job.name)
@@ -367,8 +369,11 @@ public final class TransferEngine {
         AtomicLong lastReport=new AtomicLong();
         long start=Util.now(), initial=already;
         events.progress("Отправка: "+job.name,already,job.size,0);
-        ExecutorService pool=Executors.newFixedThreadPool(Math.max(1,Math.min(lanes,8)));
-        ArrayList<Future<?>> all=new ArrayList<>();
+        // Keep only the configured number of chunks queued. Large files must not
+        // allocate a Future and a runnable for every 8 MiB block at once.
+        int parallel=Math.max(1,Math.min(lanes,8));
+        ExecutorService pool=Executors.newFixedThreadPool(parallel);
+        CompletionService<Void> completions=new ExecutorCompletionService<>(pool);
         // Open the Android content URI ONCE per file, not once per 8 MiB block.
         // Positional reads let workers share a seekable descriptor without skip(offset).
         ParcelFileDescriptor sourceDescriptor=null;
@@ -389,8 +394,12 @@ public final class TransferEngine {
                 sourceStream=null;sourceDescriptor=null;sourceChannel=null;
             }
             final FileChannel sharedSource=sourceChannel;
-            for(int ix:todo){
-                all.add(pool.submit(()->{
+            Iterator<Integer> pending=todo.iterator();
+            int active=0;
+            while(pending.hasNext()||active>0){
+                while(active<parallel&&pending.hasNext()){
+                    final int ix=pending.next();
+                    completions.submit(()->{
                     Exception last=null;
                     for(int attempt=0;attempt<3;attempt++){
                         try{
@@ -405,7 +414,7 @@ public final class TransferEngine {
                                 progress.addAndGet(bytes);
                                 inFlight.addAndGet(-thisAttempt.get());
                                 reportSend(job,progress,inFlight,lastReport,true);
-                                return;
+                                return null;
                             }catch(Exception failure){
                                 inFlight.addAndGet(-thisAttempt.get());
                                 reportSend(job,progress,inFlight,lastReport,true);
@@ -420,12 +429,20 @@ public final class TransferEngine {
                             catch(InterruptedException ie){Thread.currentThread().interrupt();break;}
                         }
                     }
-                    throw new RuntimeException(last);
-                }));
+                    throw last;
+                    });
+                    active++;
+                }
+                // Refill as soon as any worker completes. On the first failure,
+                // stop scheduling more blocks and cancel remaining work in finally.
+                try{completions.take().get();}
+                catch(ExecutionException failure){
+                    Throwable cause=failure.getCause();
+                    if(cause instanceof Exception)throw (Exception)cause;
+                    throw new IOException("Сбой передачи блока",cause);
+                }
+                active--;
             }
-            Exception fail=null;
-            for(Future<?> f:all)try{f.get();}catch(Exception e){fail=e;}
-            if(fail!=null)throw fail;
         }finally{
             pool.shutdownNow();
             if(sourceStream!=null)try{sourceStream.close();}catch(IOException ignored){}
@@ -489,7 +506,7 @@ public final class TransferEngine {
                 if(!remote.matches("[0-9a-fA-F]{64}")||
                    !remote.equalsIgnoreCase(hex(checksum.digest())))
                     throw new ChecksumMismatchException("Контрольная сумма блока не совпала. Повторно добавьте файл в очередь.");
-            }else if(verifySha&&!answer.optBoolean("already",false)){
+            }else if(verifySha){
                 throw new ChecksumMismatchException("Получатель не подтвердил контрольную сумму блока");
             }
         }finally{
