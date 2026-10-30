@@ -42,6 +42,12 @@ public final class FileCatalog {
         Item it=new Item();it.id=Util.id();it.uri=uri.toString();it.name=Util.name(c,uri);
         it.size=Util.size(c,uri);it.mime=Util.mime(c,uri);it.path=Util.safePath(path);it.status="В очереди";return it;
     }
+    public static ArrayList<Item> fromDocumentFolder(Context c,Uri tree,String docId,String name)throws Exception{
+        ArrayList<Item> result=new ArrayList<>();
+        if(tree==null||docId==null||docId.isEmpty())throw new IllegalArgumentException("Папка недоступна");
+        collect(c,tree,docId,Util.safePath(name),result,0);
+        return result;
+    }
     public static ArrayList<Item> fromFolder(Context c,Uri tree)throws Exception{
         ArrayList<Item> result=new ArrayList<>();
         String id=DocumentsContract.getTreeDocumentId(tree);

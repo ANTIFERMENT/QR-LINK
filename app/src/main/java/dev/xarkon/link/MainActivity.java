@@ -23,7 +23,7 @@ import java.util.*;
 
 /** QR LINK 0.3.19: smooth live transfer and explicit Wi-Fi / P2P state checks. */
 public final class MainActivity extends Activity {
-    private static final int FILES=41,FOLDER=42,SCAN=43,CAMERA_PERMISSION=44,WIFI_PERMISSION=45,WIFI_SEND_PERMISSION=46;
+    private static final int FILES=41,FOLDER=42,SCAN=43,CAMERA_PERMISSION=44,WIFI_PERMISSION=45,WIFI_SEND_PERMISSION=46,BROWSER=47;
     private static final int HOME=0,SEND=1,RECEIVE=2,SETTINGS=3,HISTORY=4,FTP=5;
     private static final int[] ACCENTS={
         0xff55dfcb,0xff43baf5,0xff658aff,0xffac8dff,0xffdb91ff,0xffff77ce,
@@ -691,8 +691,8 @@ public final class MainActivity extends Activity {
         button(connect,"scan",paired()?"СКАНИРОВАТЬ ДРУГОЙ QR":"СКАНИРОВАТЬ QR-КОД",true,this::startScanner);
         if(paired())outlineButton(connect,"check","Проверить подключение",this::validatePaired);
         liveStatus();
-        LinearLayout queue=panel("Файлы и папки","Одна кнопка для выбора файлов и целых папок. Структура папок сохраняется.","folder");
-        button(queue,"file","+ ВЫБРАТЬ ФАЙЛЫ И ПАПКИ",true,this::pickFilesOrFolder);
+        LinearLayout queue=panel("Файлы и папки","Собственный проводник: картинки, видео, музыка, приложения и файлы.","folder");
+        button(queue,"file","+ ОТКРЫТЬ ПРОВОДНИК",true,this::pickFilesOrFolder);
         queueLabel=text("Очередь пуста",13,muted,false);margin(queue,queueLabel,14);
         button(queue,"send","НАЧАТЬ ПЕРЕДАЧУ",true,()->{
             if(!ensureWifiEnabled())return;
@@ -1284,21 +1284,13 @@ public final class MainActivity extends Activity {
         new Thread(()->{try{Util.http(host,port,key,"/hello","GET",null);runOnUiThread(()->toast("Получатель доступен"));}
             catch(Exception e){runOnUiThread(()->toast("Получатель не отвечает: "+e.getMessage()));}},"qr-check").start();
     }
-    private void pickFilesOrFolder(){new AlertDialog.Builder(this).setTitle("Добавить в очередь")
-        .setItems(new String[]{"Файлы (можно выбрать несколько)","Папку со всем содержимым"},(dialog,which)->{
-            try{if(which==0){Intent i=new Intent(Intent.ACTION_OPEN_DOCUMENT);i.setType("*/*");
-                i.addCategory(Intent.CATEGORY_OPENABLE);i.putExtra(Intent.EXTRA_ALLOW_MULTIPLE,true);
-                i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION|Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
-                startActivityForResult(i,FILES);
-            }else{Intent i=new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
-                i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION|Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
-                startActivityForResult(i,FOLDER);}}
-            catch(Exception e){toast("Системный проводник недоступен: "+e.getMessage());}
-        }).show();
+    private void pickFilesOrFolder(){
+        startActivityForResult(new Intent(this,FileBrowserActivity.class),BROWSER);
     }
     @Override protected void onActivityResult(int req,int result,Intent data){super.onActivityResult(req,result,data);
         if(result!=RESULT_OK||data==null)return;
         if(req==SCAN){connectQr(data.getStringExtra("qr"));return;}
+        if(req==BROWSER){updateQueue();return;}
         try{
             if(req==FILES){ArrayList<FileCatalog.Item> files=new ArrayList<>();
                 if(data.getClipData()!=null){for(int i=0;i<data.getClipData().getItemCount();i++){

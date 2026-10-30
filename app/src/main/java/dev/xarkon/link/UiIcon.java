@@ -23,6 +23,10 @@ public final class UiIcon extends View {
             case "receive": l(nativeCanvas,12,3,12,16);l(nativeCanvas,6,11,12,17);l(nativeCanvas,18,11,12,17);l(nativeCanvas,4,18,4,21);l(nativeCanvas,4,21,20,21);l(nativeCanvas,20,21,20,18);break;
             case "scan": l(nativeCanvas,3,9,3,3);l(nativeCanvas,3,3,9,3);l(nativeCanvas,15,3,21,3);l(nativeCanvas,21,3,21,9);l(nativeCanvas,3,15,3,21);l(nativeCanvas,3,21,9,21);l(nativeCanvas,15,21,21,21);l(nativeCanvas,21,21,21,15);l(nativeCanvas,6,12,18,12);break;
             case "file":l(nativeCanvas,6,2,15,2);l(nativeCanvas,15,2,20,7);l(nativeCanvas,20,7,20,22);l(nativeCanvas,20,22,6,22);l(nativeCanvas,6,22,6,2);l(nativeCanvas,15,2,15,7);l(nativeCanvas,15,7,20,7);l(nativeCanvas,9,13,17,13);l(nativeCanvas,9,17,16,17);break;
+            case "image":rect(nativeCanvas,2,4,20,16,2);circle(nativeCanvas,17,9,2);l(nativeCanvas,3,18,9,12);l(nativeCanvas,9,12,13,16);l(nativeCanvas,13,16,17,12);l(nativeCanvas,17,12,21,17);break;
+            case "video":rect(nativeCanvas,2,5,15,14,2);l(nativeCanvas,17,9,22,6);l(nativeCanvas,22,6,22,18);l(nativeCanvas,22,18,17,15);l(nativeCanvas,9,9,13,12);l(nativeCanvas,13,12,9,15);l(nativeCanvas,9,15,9,9);break;
+            case "music":l(nativeCanvas,10,5,20,3);l(nativeCanvas,20,3,20,17);l(nativeCanvas,10,5,10,19);circle(nativeCanvas,7,19,3);circle(nativeCanvas,17,17,3);break;
+            case "apps":rect(nativeCanvas,3,3,7,7,2);rect(nativeCanvas,14,3,7,7,2);rect(nativeCanvas,3,14,7,7,2);rect(nativeCanvas,14,14,7,7,2);break;
             case "folder":l(nativeCanvas,2,7,2,20);l(nativeCanvas,2,20,22,20);l(nativeCanvas,22,20,22,9);l(nativeCanvas,22,9,11,9);l(nativeCanvas,11,9,9,5);l(nativeCanvas,9,5,2,5);l(nativeCanvas,2,5,2,7);break;
             case "theme":circle(nativeCanvas,12,12,9);circle(nativeCanvas,7,11,1);circle(nativeCanvas,13,7,1);circle(nativeCanvas,18,12,1);circle(nativeCanvas,12,17,1);break;
             case "history":circle(nativeCanvas,12,12,9);l(nativeCanvas,12,6,12,12);l(nativeCanvas,12,12,17,15);break;
