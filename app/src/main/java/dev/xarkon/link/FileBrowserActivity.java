@@ -56,6 +56,8 @@ public final class FileBrowserActivity extends Activity {
     // Cancel obsolete provider queries when navigating quickly between tabs/folders.
     private CancellationSignal activeQuery;
     private final Handler ui=new Handler(Looper.getMainLooper());
+    // Coalesce rapid keystrokes instead of sorting and rebuilding the page each time.
+    private final Runnable searchRefresh=()->{page=0;render();};
 
     private static final class Entry {
         Uri uri,tree;
@@ -128,7 +130,10 @@ public final class FileBrowserActivity extends Activity {
         root.addView(tools);
         search.addTextChangedListener(new TextWatcher(){
             public void beforeTextChanged(CharSequence s,int start,int c,int after){}
-            public void onTextChanged(CharSequence s,int start,int before,int count){page=0;render();}
+            public void onTextChanged(CharSequence s,int start,int before,int count){
+                ui.removeCallbacks(searchRefresh);
+                ui.postDelayed(searchRefresh,140);
+            }
             public void afterTextChanged(Editable e){}
         });
         scroll=new ScrollView(this);scroll.setFillViewport(true);
@@ -173,6 +178,9 @@ public final class FileBrowserActivity extends Activity {
     }
     private void switchTab(int index){
         tab=index;page=0;tree=null;folderId="";folderPath="";mediaPath="";history.clear();
+        // Do not expose the previous tab's entries while the new provider query is pending.
+        current.clear();safTruncated=false;
+        ui.removeCallbacks(searchRefresh);
         search.setText("");updateTabs();load();
     }
     private boolean isMedia(){return tab<3;}
@@ -550,8 +558,20 @@ public final class FileBrowserActivity extends Activity {
     }
     private void updateCount(){
         if(count==null)return;
-        count.setText(selected.isEmpty()?"Ничего не выбрано":
-            "Выбрано: "+selected.size()+" · файлы и папки");
+        if(selected.isEmpty())count.setText("Ничего не выбрано");
+        else{
+            int folders=0,unknown=0;
+            long bytes=0;
+            for(Entry e:selected.values()){
+                if(e.folder){folders++;continue;}
+                if(e.size<0){unknown++;continue;}
+                bytes=Long.MAX_VALUE-bytes<e.size?Long.MAX_VALUE:bytes+e.size;
+            }
+            String summary="Выбрано: "+selected.size()+" · файлов: "+(selected.size()-folders)+
+                " · папок: "+folders+" · размер файлов: "+Util.readable(bytes);
+            if(folders>0||unknown>0)summary+=" (без размера папок"+(unknown>0?", неизвестно: "+unknown:"")+")";
+            count.setText(summary);
+        }
         action.setAlpha(selected.isEmpty()||busy?.42f:1f);
         action.setBackground(shape(accent,0,14));
     }
@@ -582,8 +602,15 @@ public final class FileBrowserActivity extends Activity {
         Uri uri=data.getData();
         try{
             getContentResolver().takePersistableUriPermission(uri,Intent.FLAG_GRANT_READ_URI_PERMISSION);
-            tab=4;tree=null;folderId="";folderPath="";mediaPath="";history.clear();
-            updateTabs();load();
+            // Open the granted folder immediately. Back returns to the saved roots.
+            String id=DocumentsContract.getTreeDocumentId(uri);
+            Uri rootDocument=DocumentsContract.buildDocumentUriUsingTree(uri,id);
+            tab=4;tree=uri;folderId=id;folderPath=Util.name(this,rootDocument);
+            mediaPath="";history.clear();
+            history.push(new Location(null,"","",""));
+            current.clear();safTruncated=false;
+            ui.removeCallbacks(searchRefresh);
+            search.setText("");updateTabs();load();
         }catch(Exception e){Toast.makeText(this,"Нет доступа к папке: "+e.getMessage(),Toast.LENGTH_LONG).show();}
     }
     private void commitSelection(){
@@ -633,6 +660,7 @@ public final class FileBrowserActivity extends Activity {
     }
     @Override protected void onDestroy(){
         ++serial;if(activeQuery!=null)activeQuery.cancel();
+        ui.removeCallbacks(searchRefresh);
         io.shutdownNow();previews.shutdownNow();previewWaiters.clear();
         previewCache.evictAll();super.onDestroy();
     }
