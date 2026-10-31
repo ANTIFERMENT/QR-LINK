@@ -53,6 +53,8 @@ public final class FileBrowserActivity extends Activity {
     private Uri tree;
     private boolean busy=false;
     private boolean safTruncated=false;
+    // Cancel obsolete provider queries when navigating quickly between tabs/folders.
+    private CancellationSignal activeQuery;
     private final Handler ui=new Handler(Looper.getMainLooper());
 
     private static final class Entry {
@@ -218,6 +220,9 @@ public final class FileBrowserActivity extends Activity {
     }
     private void load(){
         page=0;
+        if(activeQuery!=null)activeQuery.cancel();
+        final CancellationSignal signal=new CancellationSignal();
+        activeQuery=signal;
         int token=++serial;
         subtitle.setText(isMedia()?TABS[tab]+(mediaPath.isEmpty()?"":" · "+mediaPath):
             tab==3?"Установленные приложения":
@@ -232,8 +237,8 @@ public final class FileBrowserActivity extends Activity {
         final String mediaFolder=mediaPath;final String displayPath=folderPath;
         io.execute(()->{
             try{
-                ArrayList<Entry> result=cat<3?queryMedia(cat,mediaFolder,false):cat==3?queryApps():
-                    queryDocuments(rootTree,doc,displayPath);
+                ArrayList<Entry> result=cat<3?queryMedia(cat,mediaFolder,false,signal):cat==3?queryApps(signal):
+                    queryDocuments(rootTree,doc,displayPath,signal);
                 ui.post(()->{if(token!=serial||isFinishing())return;
                     safTruncated=result instanceof Entries&&((Entries)result).truncated;
                     current.clear();current.addAll(result);render();});
@@ -249,6 +254,9 @@ public final class FileBrowserActivity extends Activity {
      * selected, reject oversized folders rather than sending an incomplete set.
      */
     private ArrayList<Entry> queryMedia(int cat,String prefix,boolean complete){
+        return queryMedia(cat,prefix,complete,null);
+    }
+    private ArrayList<Entry> queryMedia(int cat,String prefix,boolean complete,CancellationSignal cancellation){
         ArrayList<Entry> result=new ArrayList<>();
         Uri base=collection(cat);
         String[] cols={MediaStore.MediaColumns._ID,MediaStore.MediaColumns.DISPLAY_NAME,
@@ -257,9 +265,10 @@ public final class FileBrowserActivity extends Activity {
         String selection=prefix.isEmpty()?null:MediaStore.MediaColumns.RELATIVE_PATH+" LIKE ?";
         String[] args=prefix.isEmpty()?null:new String[]{prefix+"%"};
         try(Cursor c=getContentResolver().query(base,cols,selection,args,
-                MediaStore.MediaColumns.DATE_MODIFIED+" DESC")){
+                MediaStore.MediaColumns.DATE_MODIFIED+" DESC",cancellation)){
             if(c==null)throw new IllegalStateException("Медиатека недоступна");
             while(c.moveToNext()){
+                if(cancellation!=null&&cancellation.isCanceled())throw new OperationCanceledException();
                 String path=c.isNull(5)?"":c.getString(5);
                 // Check the actual path too: SQL LIKE treats % and _ as wildcards.
                 if(!path.startsWith(prefix))continue;
@@ -277,13 +286,14 @@ public final class FileBrowserActivity extends Activity {
         }
         return result;
     }
-    private ArrayList<Entry> queryApps(){
+    private ArrayList<Entry> queryApps(CancellationSignal cancellation){
         PackageManager pm=getPackageManager();
         Intent launch=new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER);
         List<ResolveInfo> infos=pm.queryIntentActivities(launch,0);
         LinkedHashSet<String> seen=new LinkedHashSet<>();
         ArrayList<Entry> result=new ArrayList<>();
         for(ResolveInfo info:infos){
+            if(cancellation.isCanceled())throw new OperationCanceledException();
             if(info.activityInfo==null)continue;
             String pkg=info.activityInfo.packageName;
             if(!seen.add(pkg))continue;
@@ -300,10 +310,11 @@ public final class FileBrowserActivity extends Activity {
         }
         return result;
     }
-    private ArrayList<Entry> queryDocuments(Uri rootTree,String doc,String displayPath){
+    private ArrayList<Entry> queryDocuments(Uri rootTree,String doc,String displayPath,CancellationSignal cancellation){
         Entries result=new Entries();
         if(rootTree==null){
             for(UriPermission perm:getContentResolver().getPersistedUriPermissions()){
+                if(cancellation.isCanceled())throw new OperationCanceledException();
                 if(!perm.isReadPermission())continue;
                 Uri u=perm.getUri();
                 try{
@@ -320,7 +331,7 @@ public final class FileBrowserActivity extends Activity {
             DocumentsContract.Document.COLUMN_DISPLAY_NAME,
             DocumentsContract.Document.COLUMN_MIME_TYPE,DocumentsContract.Document.COLUMN_SIZE,
             DocumentsContract.Document.COLUMN_LAST_MODIFIED};
-        try(Cursor c=getContentResolver().query(children,cols,null,null,null)){
+        try(Cursor c=getContentResolver().query(children,cols,null,null,null,cancellation)){
             if(c==null)throw new IllegalStateException("Папка недоступна");
             // Keep subdirectories navigable even when a provider returns thousands
             // of files first. Bound memory and mark incomplete listings explicitly.
@@ -328,7 +339,7 @@ public final class FileBrowserActivity extends Activity {
             ArrayList<Entry> files=new ArrayList<>();
             int scanned=0;
             while(c.moveToNext()){
-                if(Thread.currentThread().isInterrupted())break;
+                if(cancellation.isCanceled())throw new OperationCanceledException();
                 if(++scanned>50000){result.truncated=true;break;}
                 Entry e=new Entry();e.docId=c.getString(0);e.name=Util.safeName(c.getString(1));
                 e.mime=c.getString(2);e.folder=DocumentsContract.Document.MIME_TYPE_DIR.equals(e.mime);
@@ -483,7 +494,9 @@ public final class FileBrowserActivity extends Activity {
                     if(listeners==null||ready==null)return;
                     for(WeakReference<ImageView> ref:listeners){
                         ImageView view=ref.get();
-                        if(view!=null&&view.isAttachedToWindow()){
+                        // The decode may finish before a newly created row is attached.
+                        // Binding the bitmap is safe even before the first layout pass.
+                        if(view!=null){
                             view.setImageBitmap(ready);view.setVisibility(View.VISIBLE);
                         }
                     }
@@ -619,7 +632,8 @@ public final class FileBrowserActivity extends Activity {
         jobs.add(it);
     }
     @Override protected void onDestroy(){
-        ++serial;io.shutdownNow();previews.shutdownNow();previewWaiters.clear();
+        ++serial;if(activeQuery!=null)activeQuery.cancel();
+        io.shutdownNow();previews.shutdownNow();previewWaiters.clear();
         previewCache.evictAll();super.onDestroy();
     }
 }
