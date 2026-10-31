@@ -11,6 +11,7 @@ on:
       - 'scripts/import_source_zip.py'
       - 'scripts/sign_release.py'
       - 'scripts/make_manifest.py'
+      - 'release_notes/**'
       - 'app/**'
       - 'gradle/**'
       - 'gradlew'
@@ -137,13 +138,32 @@ jobs:
           RELEASE_VERSION: ${{ steps.metadata.outputs.version }}
         run: |
           set -euo pipefail
+          NOTES="release_notes/$RELEASE_TAG.txt"
+          test -s "$NOTES" || { echo "::error::Missing non-empty release notes: $NOTES"; exit 1; }
           if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             echo "::notice::Version $RELEASE_TAG was already released. Change versionName and versionCode for the next release."
             exit 0
           fi
-          gh release create "$RELEASE_TAG" dist/QR-LINK.apk dist/update.json \
+          gh release create "$RELEASE_TAG" dist/QR-LINK.apk dist/update.json "$NOTES" \
             --repo "$GITHUB_REPOSITORY" \
             --target "$GITHUB_SHA" \
             --title "QR LINK $RELEASE_VERSION" \
-            --generate-notes \
+            --notes-file "$NOTES" \
             --latest
+          # Verify the actual published assets, not just a successful upload command.
+          for asset in QR-LINK.apk update.json "$(basename "$NOTES")"; do
+            found=false
+            for attempt in 1 2 3 4 5; do
+              if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+                  --json assets --jq '.assets[].name' | grep -Fxq "$asset"; then
+                found=true
+                break
+              fi
+              sleep 3
+            done
+            if [[ "$found" != true ]]; then
+              echo "::error::Release asset missing: $asset"
+              exit 1
+            fi
+          done
+          echo "Published APK, OTA manifest and exact version notes: $RELEASE_TAG"
