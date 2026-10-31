@@ -1064,10 +1064,11 @@ public final class MainActivity extends Activity {
                 if(isFinishing()||isDestroyed())return;
                 if(!newer){refreshHomeUpdateCard(false);offerStoredBackgroundUpdate();return;}
                 prefs().edit().putLong(OtaUpdateSchedule.PREF_AVAILABLE_CODE,r.versionCode)
-                    .putString(OtaUpdateSchedule.PREF_AVAILABLE_NAME,r.versionName).apply();
+                    .putString(OtaUpdateSchedule.PREF_AVAILABLE_NAME,r.versionName)
+                    .putString("ota_available_notes",r.notes).apply();
                 refreshHomeUpdateCard(true);
                 OtaProgressDialog offer=new OtaProgressDialog(MainActivity.this);
-                offer.show();offer.offer(r.versionName,()->downloadAndInstallUpdate(r,offer));
+                offer.show();offer.offer(r.versionName,r.notes,()->downloadAndInstallUpdate(r,offer));
             }
             @Override public void downloaded(java.io.File file){}
             @Override public void error(String message){}
@@ -1084,7 +1085,7 @@ public final class MainActivity extends Activity {
         prefs().edit().putLong("ota_last_prompted_code",code).apply();
         String name=prefs().getString(OtaUpdateSchedule.PREF_AVAILABLE_NAME,"новая версия");
         OtaProgressDialog offer=new OtaProgressDialog(this);
-        offer.show();offer.offer(name,()->{
+        offer.show();offer.offer(name,prefs().getString("ota_available_notes",""),()->{
             offer.dismiss();checkForUpdates();
         });
     }
@@ -1103,7 +1104,7 @@ public final class MainActivity extends Activity {
             }
             @Override public void release(UpdateManager.Release r,boolean newer){
                 if(isFinishing()||isDestroyed())return;
-                if(newer)downloadAndInstallUpdate(r,ui);
+                if(newer)ui.offer(r.versionName,r.notes,()->downloadAndInstallUpdate(r,ui));
                 else ui.current("Версия "+getAppVersion());
             }
             @Override public void downloaded(java.io.File file){}

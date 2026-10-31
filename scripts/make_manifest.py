@@ -9,6 +9,17 @@ import re
 import subprocess
 from urllib.parse import quote
 
+def load_release_notes(version):
+    filename = Path("release_notes") / f"v{version}.txt"
+    if not filename.is_file():
+        return f"QR LINK {version}. Подробное описание изменений для этой версии не предоставлено."
+    notes = filename.read_text(encoding="utf-8").strip()
+    if not notes:
+        raise SystemExit("Empty release notes: " + str(filename))
+    if len(notes) > 6000:
+        raise SystemExit("Release notes too long: " + str(filename))
+    return notes
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--apk", required=True)
@@ -41,7 +52,7 @@ def main():
         "sha256": sha,
         "sizeBytes": apk.stat().st_size,
         "publishedAt": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        "notes": f"QR LINK {version}. Список изменений опубликован в GitHub Releases."
+        "notes": load_release_notes(version)
     }
     out = Path(args.output)
     out.parent.mkdir(parents=True, exist_ok=True)

@@ -26,7 +26,8 @@ public final class BackgroundUpdateJob extends JobService {
                     .apply();
                 if(release.versionCode>installed){
                     prefs.edit().putLong(OtaUpdateSchedule.PREF_AVAILABLE_CODE,release.versionCode)
-                        .putString(OtaUpdateSchedule.PREF_AVAILABLE_NAME,release.versionName).apply();
+                        .putString(OtaUpdateSchedule.PREF_AVAILABLE_NAME,release.versionName)
+                        .putString("ota_available_notes",release.notes).apply();
                     long previous=prefs.getLong("ota_last_notified_code",0L);
                     if(release.versionCode>previous){
                         if(notifyUpdate(release.versionName))

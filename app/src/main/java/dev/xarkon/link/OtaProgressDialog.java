@@ -30,6 +30,8 @@ public final class OtaProgressDialog {
     private final TextView heading, label, details, bytes, percent, primary, secondary;
     private final CenteredRing mark;
     private final ProgressBar bar;
+    private final android.widget.ScrollView notesScroll;
+    private final TextView notesText;
     private final int accent, foreground, muted, panel;
     private final boolean animate;
     private ValueAnimator numberAnim, spin, sweepAnim;
@@ -110,6 +112,17 @@ public final class OtaProgressDialog {
         LinearLayout.LayoutParams sl=new LinearLayout.LayoutParams(-1,-2);sl.topMargin=dp(25);root.addView(label,sl);
         details=text("Подключение к серверу...",12,muted,false);
         LinearLayout.LayoutParams dl=new LinearLayout.LayoutParams(-1,-2);dl.topMargin=dp(7);root.addView(details,dl);
+        notesScroll=new android.widget.ScrollView(a);
+        notesScroll.setFillViewport(false);
+        notesScroll.setVerticalScrollBarEnabled(false);
+        notesScroll.setBackground(shape(light?0xfff3f6f9:0xff0c0f12,stroke,15));
+        notesText=text("",13,foreground,false);
+        notesText.setPadding(dp(13),dp(12),dp(13),dp(13));
+        notesText.setLineSpacing(dp(4),1f);
+        notesScroll.addView(notesText);
+        LinearLayout.LayoutParams notesLp=new LinearLayout.LayoutParams(-1,dp(172));
+        notesLp.topMargin=dp(15);root.addView(notesScroll,notesLp);
+        notesScroll.setVisibility(View.GONE);
         LinearLayout numbers=new LinearLayout(a);numbers.setOrientation(LinearLayout.HORIZONTAL);
         numbers.setGravity(Gravity.CENTER_VERTICAL);
         LinearLayout.LayoutParams nl=new LinearLayout.LayoutParams(-1,-2);nl.topMargin=dp(22);root.addView(numbers,nl);
@@ -234,7 +247,18 @@ public final class OtaProgressDialog {
         primary.setVisibility(retry==null?View.GONE:View.VISIBLE);
         primary.setOnClickListener(v->{if(retry!=null)retry.run();});
     }
+    private void showNotes(String source){
+        String notes=source==null?"":source.trim();
+        notes=notes.replace("GitHub Releases","списке обновлений")
+            .replace("GitHub","сервером обновлений");
+        if(notes.isEmpty()){notesScroll.setVisibility(View.GONE);return;}
+        if(notes.length()>6000)notes=notes.substring(0,6000)+"…";
+        notesText.setText(notes);
+        notesScroll.setScrollY(0);
+        notesScroll.setVisibility(View.VISIBLE);
+    }
     public void current(String version){
+        notesScroll.setVisibility(View.GONE);
         if(numberAnim!=null)numberAnim.cancel();rotating(false);
         heading.setText("QR LINK обновлён");
         label.setText("Установлена актуальная версия");
@@ -243,7 +267,9 @@ public final class OtaProgressDialog {
         bar.setIndeterminate(false);bar.setProgress(1000);
         primary.setVisibility(View.GONE);secondary.setText("ЗАКРЫТЬ");
     }
-    public void offer(String version,Runnable install){
+    public void offer(String version,Runnable install){offer(version,"",install);}
+    public void offer(String version,String changes,Runnable install){
+        showNotes(changes);
         rotating(false);bar.setIndeterminate(false);bar.setProgress(0);
         heading.setText("Доступно обновление");
         label.setText("QR LINK "+version);
