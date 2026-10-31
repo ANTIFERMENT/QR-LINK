@@ -11,13 +11,19 @@ public final class WifiPeerConnector {
     public interface Listener {void connected(String host);void failure(String reason);}
     private final ConnectivityManager manager;
     private ConnectivityManager.NetworkCallback callback;
+    private long generation;
+    private synchronized boolean current(long token,ConnectivityManager.NetworkCallback owner){
+        return generation==token&&callback==owner;
+    }
     public WifiPeerConnector(Context c){manager=(ConnectivityManager)c.getSystemService(Context.CONNECTIVITY_SERVICE);}
     public synchronized void stop(){
+        generation++; // Invalidate callbacks and background discovery from the previous attempt.
         if(callback!=null){try{manager.unregisterNetworkCallback(callback);}catch(Exception ignored){}callback=null;}
         try{manager.bindProcessToNetwork(null);}catch(Exception ignored){}
     }
     public synchronized void connect(Pairing.Info info,Listener listener){
         stop();
+        final long attempt=++generation;
         try{
             WifiNetworkSpecifier.Builder spec=new WifiNetworkSpecifier.Builder().setSsid(info.ssid);
             // Android may choose WPA3; use the same mode specified by the receiver.
@@ -30,12 +36,29 @@ public final class WifiPeerConnector {
             final boolean[] delivered={false};
             final boolean[] discovering={false};
             callback=new ConnectivityManager.NetworkCallback(){
+                private final java.util.concurrent.atomic.AtomicBoolean failed=
+                    new java.util.concurrent.atomic.AtomicBoolean(false);
+                private boolean active(){return current(attempt,this);}
+                private void fail(String reason){
+                    if(!active()||!failed.compareAndSet(false,true))return;
+                    WifiPeerConnector.this.stop();
+                    listener.failure(reason);
+                }
                 @Override public void onAvailable(Network n){
-                    manager.bindProcessToNetwork(n);
+                    synchronized(WifiPeerConnector.this){
+                        if(!active()||failed.get())return;
+                        if(!manager.bindProcessToNetwork(n)){
+                            fail("Android не разрешил использовать выбранную сеть Wi-Fi");
+                            return;
+                        }
+                    }
                     deliver(n);
                 }
-                @Override public void onLinkPropertiesChanged(Network n,LinkProperties lp){deliver(n);}
+                @Override public void onLinkPropertiesChanged(Network n,LinkProperties lp){
+                    if(active())deliver(n);
+                }
                 private void deliver(Network n){
+                    if(!active()||failed.get())return;
                     synchronized(delivered){if(delivered[0])return;}
                     LinkProperties lp=manager.getLinkProperties(n);
                     if(lp==null)return;
@@ -51,24 +74,27 @@ public final class WifiPeerConnector {
                         final LinkProperties properties=lp;
                         new Thread(()->{
                             String found=discoverPeer(n,properties);
+                            if(!active()||failed.get())return;
                             if(!found.isEmpty()){
                                 synchronized(delivered){if(delivered[0])return;delivered[0]=true;}
                                 listener.connected(found);
-                            }else listener.failure("Сеть подключена, но Android не сообщил адрес приёмника. Повторите подключение.");
+                            }else fail("Сеть подключена, но Android не сообщил адрес приёмника. Повторите подключение.");
                         },"qr-link-find-peer").start();
                         return;
                     }
+                    if(!active()||failed.get())return;
                     synchronized(delivered){if(delivered[0])return;delivered[0]=true;}
                     listener.connected(host);
                 }
-                @Override public void onUnavailable(){listener.failure("Android не подключился к точке доступа. Подтвердите запрос Wi-Fi и повторите сканирование.");}
+                @Override public void onUnavailable(){
+                    fail("Android не подключился к точке доступа. Подтвердите запрос Wi-Fi и повторите сканирование.");
+                }
                 @Override public void onLost(Network n){
-                    manager.bindProcessToNetwork(null);
-                    listener.failure("Соединение с точкой доступа потеряно");
+                    fail("Соединение с точкой доступа потеряно");
                 }
             };
             manager.requestNetwork(request,callback,25000);
-        }catch(Exception e){listener.failure("Подключение Wi-Fi: "+e.getMessage());}
+        }catch(Exception e){stop();listener.failure("Подключение Wi-Fi: "+e.getMessage());}
     }
     /** Uses the existing authenticated receiver's UDP discovery endpoint when DHCP omits its IP. */
     private static String discoverPeer(Network network,LinkProperties links){
@@ -93,17 +119,24 @@ public final class WifiPeerConnector {
             byte[] response=new byte[512];DatagramPacket packet=new DatagramPacket(response,response.length);
             socket.receive(packet);
             String answer=new String(packet.getData(),packet.getOffset(),packet.getLength(),StandardCharsets.UTF_8);
-            if(answer.startsWith("XARKON_LINK_1|"))return packet.getAddress().getHostAddress();
+            if(answer.startsWith("XARKON_LINK_1|")&&localAddress(packet.getAddress()))
+                return packet.getAddress().getHostAddress();
         }catch(Exception ignored){}
         return "";
     }
+    /** Never send a session key to a public gateway or a spoofed public discovery IP. */
+    private static boolean localAddress(InetAddress address){
+        return address instanceof Inet4Address&&
+            (address.isSiteLocalAddress()||address.isLinkLocalAddress());
+    }
     private static String resolveApAddress(LinkProperties links){
         if(links==null)return "";
-        if(android.os.Build.VERSION.SDK_INT>=30&&links.getDhcpServerAddress()!=null)
+        if(android.os.Build.VERSION.SDK_INT>=30&&
+            localAddress(links.getDhcpServerAddress()))
             return links.getDhcpServerAddress().getHostAddress();
         for(RouteInfo r:links.getRoutes()){
             InetAddress gateway=r.getGateway();
-            if(gateway instanceof Inet4Address&&!gateway.isAnyLocalAddress())return gateway.getHostAddress();
+            if(localAddress(gateway))return gateway.getHostAddress();
         }
         // When AP does not advertise a gateway, no safe address can be deduced.
         return "";
