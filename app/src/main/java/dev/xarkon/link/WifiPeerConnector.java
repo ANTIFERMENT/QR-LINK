@@ -38,6 +38,8 @@ public final class WifiPeerConnector {
             callback=new ConnectivityManager.NetworkCallback(){
                 private final java.util.concurrent.atomic.AtomicBoolean failed=
                     new java.util.concurrent.atomic.AtomicBoolean(false);
+                private volatile boolean bound;
+                private volatile LinkProperties latestProperties;
                 private boolean active(){return current(attempt,this);}
                 private void fail(String reason){
                     if(!active()||!failed.compareAndSet(false,true))return;
@@ -51,17 +53,21 @@ public final class WifiPeerConnector {
                             fail("Android не разрешил использовать выбранную сеть Wi-Fi");
                             return;
                         }
+                        bound=true;
                     }
-                    deliver(n);
+                    LinkProperties properties=latestProperties;
+                    deliver(n,properties!=null?properties:manager.getLinkProperties(n));
                 }
                 @Override public void onLinkPropertiesChanged(Network n,LinkProperties lp){
-                    if(active())deliver(n);
+                    if(!active())return;
+                    latestProperties=lp;
+                    // Android may report link properties before onAvailable.
+                    // Do not announce a peer until this process is bound to its Wi-Fi network.
+                    if(bound)deliver(n,lp);
                 }
-                private void deliver(Network n){
-                    if(!active()||failed.get())return;
+                private void deliver(Network n,LinkProperties lp){
+                    if(!active()||failed.get()||!bound||lp==null)return;
                     synchronized(delivered){if(delivered[0])return;}
-                    LinkProperties lp=manager.getLinkProperties(n);
-                    if(lp==null)return;
                     boolean hasIpv4=false;
                     for(LinkAddress local:lp.getLinkAddresses()){
                         if(local.getAddress() instanceof Inet4Address){hasIpv4=true;break;}
@@ -116,11 +122,19 @@ public final class WifiPeerConnector {
                 }
                 socket.send(new DatagramPacket(data,data.length,InetAddress.getByAddress(broadcast),Util.DISCOVERY_PORT));
             }
-            byte[] response=new byte[512];DatagramPacket packet=new DatagramPacket(response,response.length);
-            socket.receive(packet);
-            String answer=new String(packet.getData(),packet.getOffset(),packet.getLength(),StandardCharsets.UTF_8);
-            if(answer.startsWith("XARKON_LINK_1|")&&localAddress(packet.getAddress()))
-                return packet.getAddress().getHostAddress();
+            // Ignore unrelated UDP packets rather than failing discovery on the first one.
+            long deadline=android.os.SystemClock.elapsedRealtime()+2500L;
+            while(android.os.SystemClock.elapsedRealtime()<deadline){
+                long left=deadline-android.os.SystemClock.elapsedRealtime();
+                socket.setSoTimeout((int)Math.max(1L,left));
+                byte[] response=new byte[512];
+                DatagramPacket packet=new DatagramPacket(response,response.length);
+                try{socket.receive(packet);}
+                catch(SocketTimeoutException timeout){break;}
+                String answer=new String(packet.getData(),packet.getOffset(),packet.getLength(),StandardCharsets.UTF_8);
+                if(answer.startsWith("XARKON_LINK_1|")&&answer.endsWith("|"+Util.PORT)&&
+                   localAddress(packet.getAddress()))return packet.getAddress().getHostAddress();
+            }
         }catch(Exception ignored){}
         return "";
     }
