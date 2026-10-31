@@ -57,9 +57,10 @@ public final class Pairing {
         String version=u.getQueryParameter("v");
         if(!("2".equals(version)||"3".equals(version)||"4".equals(version)))
             throw new Exception("Неподдерживаемая версия QR LINK");
+        QrInputValidation.requireMode(version,u.getQueryParameter("ap"),u.getQueryParameter("p2p"));
         String host=u.getQueryParameter("host"),key=u.getQueryParameter("key");
-        boolean direct="4".equals(version)&&"1".equals(u.getQueryParameter("p2p"));
-        boolean ap=("3".equals(version)||direct)&&"1".equals(u.getQueryParameter("ap"));
+        boolean direct="4".equals(version);
+        boolean ap="3".equals(version)||direct;
         if(host==null)host="";
         if(!host.isEmpty()){
             if(!QrInputValidation.isLocalIpv4(host))
