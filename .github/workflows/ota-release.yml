@@ -87,6 +87,10 @@ jobs:
         with:
           gradle-version: '9.6.1'
 
+      - name: Run offline OTA regression tests before building a release
+        shell: bash
+        run: python3 -m unittest discover -v -s tests
+
       - name: Assemble release APK
         shell: bash
         run: |

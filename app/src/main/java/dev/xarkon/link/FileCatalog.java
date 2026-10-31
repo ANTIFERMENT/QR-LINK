@@ -63,9 +63,26 @@ public final class FileCatalog {
         return out;
     }
     public static synchronized void save(Context c,List<Item> items){
+        saveSnapshot(c,items,true);
+    }
+    private static void saveSnapshot(Context c,List<Item> items,boolean mergePendingStatuses){
+        // A caller may hold a stale queue snapshot while the transfer service
+        // has written newer statuses to SQLite. Merge them BEFORE deleting the
+        // status journal, otherwise a queue edit can revert "Передан" to "В очереди".
+        if(mergePendingStatuses&&!items.isEmpty())try{
+            HashMap<String,Item> byId=new HashMap<>();
+            for(Item item:items)if(item.id!=null)byId.put(item.id,item);
+            try(Cursor cursor=statusDb(c).rawQuery("SELECT id,status FROM item_status",null)){
+                while(cursor.moveToNext()){
+                    Item item=byId.get(cursor.getString(0));
+                    if(item!=null)item.status=cursor.getString(1);
+                }
+            }
+        }catch(Exception ignored){
+            // Preserve the supplied queue snapshot if the status DB is unavailable.
+        }
         JSONArray a=new JSONArray();try{for(Item it:items)a.put(it.json());}catch(Exception ignored){}
-        // Flush the merged snapshot first. Never discard pending statuses when
-        // SharedPreferences cannot persist the queue (for example, disk full).
+        // Never discard the status journal unless the merged snapshot is durable.
         boolean saved=c.getSharedPreferences(PREF,0).edit().putString("list",a.toString()).commit();
         if(saved)try{statusDb(c).delete("item_status",null,null);}catch(Exception ignored){}
     }
@@ -82,7 +99,9 @@ public final class FileCatalog {
         // SQLite is temporarily unavailable. No transfer result is discarded.
         ArrayList<Item> all=load(c);
         for(Item it:all)if(id.equals(it.id)){it.status=status;break;}
-        save(c,all);
+        // The fallback has explicitly updated this status. Do not overlay a
+        // stale SQLite row if the database has become read-only.
+        saveSnapshot(c,all,false);
     }
     public static Item single(Context c,Uri uri,String path){
         Item it=new Item();it.id=Util.id();it.uri=uri.toString();it.name=Util.name(c,uri);

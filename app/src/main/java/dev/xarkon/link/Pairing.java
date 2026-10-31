@@ -40,7 +40,10 @@ public final class Pairing {
         Info(String h,int p,String k,String s,String pw,int sec,boolean ap,boolean dr,String m){host=h;port=p;key=k;ssid=s;password=pw;security=sec;hotspot=ap;direct=dr;mac=m;}
     }
     public static Info parse(String value) throws Exception {
-        Uri u=Uri.parse(value==null?"":value.trim());
+        // Reject oversized or empty external scanner input before URI parsing.
+        if(value==null||value.length()==0||value.length()>4096)
+            throw new Exception("Некорректная длина QR-кода");
+        Uri u=Uri.parse(value.trim());
         if(!"xarkonlink".equals(u.getScheme())||!"pair".equals(u.getAuthority())
                 ||!("2".equals(u.getQueryParameter("v"))||"3".equals(u.getQueryParameter("v"))||"4".equals(u.getQueryParameter("v"))))throw new Exception("Неподдерживаемый QR-код QR LINK");
         String host=u.getQueryParameter("host"),key=u.getQueryParameter("key");

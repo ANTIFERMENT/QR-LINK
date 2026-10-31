@@ -258,7 +258,8 @@ public final class TransferEngine {
                 events.note("Получение: "+(path.isEmpty()?"":path+"/")+name+" ("+Util.readable(size)+")");
             }
         }
-        if(inc.size!=size||!inc.name.equals(name)||!inc.path.equals(path))throw new IOException("Конфликт ID файла");
+        if(inc.size!=size||!inc.name.equals(name)||!inc.path.equals(path)||!inc.mime.equals(mime))
+            throw new IOException("Конфликт ID файла: имя, путь, размер или формат изменились");
         JSONObject r=new JSONObject();r.put("chunk",Util.CHUNK);
         boolean allDone;
         synchronized(inc){r.put("done",Base64.encodeToString(inc.done.toByteArray(),Base64.NO_WRAP));allDone=inc.done.cardinality()==inc.count;}

@@ -18,7 +18,7 @@ class OtaToolsTests(unittest.TestCase):
             apk.write_bytes(b"not a real APK; only fixture for manifest generator")
             fake_aapt = p / "aapt"
             fake_aapt.write_text(
-                "#!/bin/sh\nprintf \"package: name='com.example.qrlink' versionCode='39' versionName='0.3.9'\\n\"\n")
+                "#!/bin/sh\nprintf \"package: name='dev.xarkon.link' versionCode='39' versionName='0.3.9'\\n\"\n")
             fake_aapt.chmod(0o755)
             out = p / "update.json"
             output = p / "github_output"
@@ -29,12 +29,33 @@ class OtaToolsTests(unittest.TestCase):
                 "--output", str(out), "--github-output", str(output)
             ], check=True, cwd=p)
             manifest = json.loads(out.read_text())
-            self.assertEqual(manifest["packageName"], "com.example.qrlink")
+            self.assertEqual(manifest["packageName"], "dev.xarkon.link")
             self.assertEqual(manifest["versionCode"], 39)
             self.assertEqual(manifest["sha256"], hashlib.sha256(apk.read_bytes()).hexdigest())
             self.assertEqual(manifest["sizeBytes"], apk.stat().st_size)
             self.assertIn("/v0.3.9/QR-LINK.apk", manifest["apkUrl"])
             self.assertIn("tag=v0.3.9", output.read_text())
+
+    def test_manifest_rejects_wrong_application_id(self):
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td)
+            apk = p / "QR-LINK.apk"
+            apk.write_bytes(b"fixture")
+            fake_aapt = p / "aapt"
+            fake_aapt.write_text(
+                "#!/bin/sh\nprintf \"package: name='com.example.wrong' versionCode='48' versionName='0.3.43'\\n\"\n"
+            )
+            fake_aapt.chmod(0o755)
+            result = subprocess.run([
+                sys.executable, str(ROOT / "scripts/make_manifest.py"),
+                "--apk", str(apk), "--aapt", str(fake_aapt),
+                "--repo", "ANTIFERMENT/QR-LINK",
+                "--output", str(p / "update.json"),
+                "--github-output", str(p / "github_output")
+            ], capture_output=True, text=True, cwd=p)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("Unexpected applicationId", result.stderr + result.stdout)
+            self.assertFalse((p / "update.json").exists())
 
     def test_versioned_archive_name_is_detected(self):
         with tempfile.TemporaryDirectory() as td:

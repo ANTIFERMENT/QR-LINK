@@ -39,6 +39,10 @@ def main():
     if not match:
         raise SystemExit("Unable to parse APK version using aapt")
     package_name, code, version = match.groups()
+    if package_name != "dev.xarkon.link":
+        raise SystemExit("Unexpected applicationId: " + package_name)
+    if int(code) <= 0:
+        raise SystemExit("Invalid versionCode: " + code)
     if not re.fullmatch(r"[A-Za-z0-9._-]+", version):
         raise SystemExit("Invalid versionName for a Git tag")
     tag = "v" + version
