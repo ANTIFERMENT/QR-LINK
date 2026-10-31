@@ -22,6 +22,16 @@ public final class QrValidationHarness {
             try { QrInputValidation.requirePort(bad, 45588); throw new AssertionError("Accepted port " + bad); }
             catch (IllegalArgumentException expected) { }
         }
+        QrInputValidation.requireMode("2", null, null);
+        QrInputValidation.requireMode("3", "1", null);
+        QrInputValidation.requireMode("4", "1", "1");
+        for (String[] bad : new String[][]{
+                {"2","1",null},{"3",null,null},{"3","0",null},{"3","1","1"},
+                {"4","1",null},{"4","0","1"},{"4","1","0"}}) {
+            try { QrInputValidation.requireMode(bad[0],bad[1],bad[2]);
+                  throw new AssertionError("Accepted inconsistent QR mode"); }
+            catch (IllegalArgumentException expected) { }
+        }
         for (int i=0; i<=4; i++)
             if (QrInputValidation.security(Integer.toString(i)) != i) throw new AssertionError("Security");
         for (String bad : new String[]{"", "-1", "5", "00", "abc"}) {
