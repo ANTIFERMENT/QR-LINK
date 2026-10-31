@@ -11,7 +11,7 @@ class BrowserLimitsTests(unittest.TestCase):
         browser = BROWSER.read_text(encoding="utf-8")
         catalog = CATALOG.read_text(encoding="utf-8")
         def value(source, name):
-            match = re.search(r"\\b" + name + r"\\s*=\\s*(\\d+)\\b", source)
+            match = re.search(r"\b" + name + r"\s*=\s*(\d+)\b", source)
             self.assertIsNotNone(match, name)
             return int(match.group(1))
         self.assertGreater(value(browser, "MAX_QUEUE"), 5000)
