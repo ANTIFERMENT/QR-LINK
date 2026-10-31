@@ -2,6 +2,8 @@ package dev.xarkon.link;
 
 import android.content.*;
 import android.database.Cursor;
+import android.database.sqlite.SQLiteDatabase;
+import android.database.sqlite.SQLiteOpenHelper;
 import android.net.Uri;
 import android.provider.DocumentsContract;
 import org.json.*;
@@ -10,6 +12,23 @@ import java.util.*;
 public final class FileCatalog {
     public static final String PREF="xarkon_queue";
     private FileCatalog(){}
+    // Queue metadata is a JSON snapshot. Per-file status changes must not
+    // deserialize and rewrite thousands of unrelated entries after every file.
+    // A small SQLite table keeps each status update durable and O(log n).
+    private static StatusStore statusStore;
+    private static final class StatusStore extends SQLiteOpenHelper {
+        StatusStore(Context c){super(c.getApplicationContext(),"qr_link_status.db",null,1);}
+        @Override public void onCreate(SQLiteDatabase db){
+            db.execSQL("CREATE TABLE item_status (id TEXT PRIMARY KEY NOT NULL, status TEXT NOT NULL)");
+        }
+        @Override public void onUpgrade(SQLiteDatabase db,int oldVersion,int newVersion){
+            db.execSQL("DROP TABLE IF EXISTS item_status");onCreate(db);
+        }
+    }
+    private static SQLiteDatabase statusDb(Context c){
+        if(statusStore==null)statusStore=new StatusStore(c);
+        return statusStore.getWritableDatabase();
+    }
     public static class Item {
         public String id,uri,name,mime,path,status;
         public long size;
@@ -28,15 +47,42 @@ public final class FileCatalog {
         try{JSONArray j=new JSONArray(c.getSharedPreferences(PREF,0).getString("list","[]"));
             for(int i=0;i<j.length();i++)out.add(Item.from(j.getJSONObject(i)));
         }catch(Exception ignored){}
+        if(out.isEmpty())return out;
+        try{
+            HashMap<String,Item> byId=new HashMap<>();
+            for(Item item:out)byId.put(item.id,item);
+            try(Cursor cursor=statusDb(c).rawQuery("SELECT id,status FROM item_status",null)){
+                while(cursor.moveToNext()){
+                    Item item=byId.get(cursor.getString(0));
+                    if(item!=null)item.status=cursor.getString(1);
+                }
+            }
+        }catch(Exception ignored){
+            // Older JSON snapshots remain readable if the status DB is unavailable.
+        }
         return out;
     }
     public static synchronized void save(Context c,List<Item> items){
         JSONArray a=new JSONArray();try{for(Item it:items)a.put(it.json());}catch(Exception ignored){}
-        c.getSharedPreferences(PREF,0).edit().putString("list",a.toString()).commit();
+        // Flush the merged snapshot first. Never discard pending statuses when
+        // SharedPreferences cannot persist the queue (for example, disk full).
+        boolean saved=c.getSharedPreferences(PREF,0).edit().putString("list",a.toString()).commit();
+        if(saved)try{statusDb(c).delete("item_status",null,null);}catch(Exception ignored){}
     }
     public static synchronized void append(Context c,List<Item> items){ArrayList<Item> all=load(c);all.addAll(items);save(c,all);}
     public static synchronized void setStatus(Context c,String id,String status){
-        ArrayList<Item> all=load(c);for(Item it:all){if(it.id.equals(id)){it.status=status;break;}}save(c,all);
+        if(id==null||id.isEmpty())return;
+        try{
+            ContentValues values=new ContentValues();
+            values.put("id",id);values.put("status",status);
+            if(statusDb(c).insertWithOnConflict("item_status",null,values,
+                    SQLiteDatabase.CONFLICT_REPLACE)!=-1)return;
+        }catch(Exception ignored){}
+        // Conservative fallback: retain the original JSON status path if
+        // SQLite is temporarily unavailable. No transfer result is discarded.
+        ArrayList<Item> all=load(c);
+        for(Item it:all)if(id.equals(it.id)){it.status=status;break;}
+        save(c,all);
     }
     public static Item single(Context c,Uri uri,String path){
         Item it=new Item();it.id=Util.id();it.uri=uri.toString();it.name=Util.name(c,uri);
