@@ -37,6 +37,14 @@ public final class QrInputValidation {
         return expected;
     }
 
+    /** Version and transport flags must agree; never silently downgrade a QR invitation. */
+    public static void requireMode(String version,String ap,String p2p) {
+        boolean valid=("2".equals(version)&&ap==null&&p2p==null) ||
+            ("3".equals(version)&&"1".equals(ap)&&p2p==null) ||
+            ("4".equals(version)&&"1".equals(ap)&&"1".equals(p2p));
+        if(!valid)throw new IllegalArgumentException("Несогласованные параметры подключения в QR");
+    }
+
     public static int security(String raw) {
         // Android SoftApConfiguration currently defines security modes 0..4.
         if(raw==null||raw.length()!=1||raw.charAt(0)<'0'||raw.charAt(0)>'4')
