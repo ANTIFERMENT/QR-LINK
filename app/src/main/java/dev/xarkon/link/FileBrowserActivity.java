@@ -28,7 +28,7 @@ import java.util.concurrent.*;
 /** Permission-aware in-app browser. SAF is used only to grant access to external folders. */
 public final class FileBrowserActivity extends Activity {
     private static final String[] TABS={"Картинки","Видео","Музыка","Приложения","Файлы"};
-    private static final int PICK_TREE=501,MEDIA_PERMISSION=502,MAX_QUEUE=5000,MAX_VISIBLE=60,MAX_MEDIA_SCAN=25000;
+    private static final int PICK_TREE=501,MEDIA_PERMISSION=502,MAX_QUEUE=12000,MAX_VISIBLE=60,MAX_MEDIA_SCAN=212000;
     private final ExecutorService io=Executors.newSingleThreadExecutor();
     private final ExecutorService previews=Executors.newFixedThreadPool(2);
     private final LruCache<String,Bitmap> previewCache=new LruCache<String,Bitmap>(8*1024*1024){
@@ -273,7 +273,7 @@ public final class FileBrowserActivity extends Activity {
     }
     private ArrayList<Entry> queryMedia(int cat,String prefix,boolean complete,CancellationSignal cancellation){
         Entries result=new Entries();
-        // A gallery of the newest 5000 files may hide entire older folders.
+        // A gallery of the newest 12000 files may hide entire older folders.
         // Scan a bounded number of metadata rows for folder names, without
         // retaining more than MAX_QUEUE files or decoding thumbnails.
         LinkedHashMap<String,Entry> folders=new LinkedHashMap<>();
@@ -310,7 +310,7 @@ public final class FileBrowserActivity extends Activity {
                 }
                 if(kept>=MAX_QUEUE){
                     if(complete)throw new IllegalStateException(
-                        "В папке больше 5000 файлов. Выберите меньшую папку или отдельные файлы.");
+                        "В папке больше 12000 файлов. Выберите меньшую папку или отдельные файлы.");
                     result.truncated=true;
                     continue;
                 }
@@ -378,7 +378,7 @@ public final class FileBrowserActivity extends Activity {
             int scanned=0;
             while(c.moveToNext()){
                 if(cancellation.isCanceled())throw new OperationCanceledException();
-                if(++scanned>50000){result.truncated=true;break;}
+                if(++scanned>120000){result.truncated=true;break;}
                 Entry e=new Entry();e.docId=c.getString(0);e.name=Util.safeName(c.getString(1));
                 e.mime=c.getString(2);e.folder=DocumentsContract.Document.MIME_TYPE_DIR.equals(e.mime);
                 e.size=c.isNull(3)?-1:c.getLong(3);e.date=c.isNull(4)?0:c.getLong(4)/1000;
@@ -437,7 +437,7 @@ public final class FileBrowserActivity extends Activity {
                 "В этом разделе пока нет файлов",14,muted,false);
             nothing.setGravity(Gravity.CENTER);pad(nothing,8,35);list.addView(nothing);
         }
-        // Only build one page of rows: a 5000-item directory must not create
+        // Only build one page of rows: a 12000-item directory must not create
         // hundreds of Android Views on every search, selection or tab change.
         int pages=Math.max(1,(rows.size()+MAX_VISIBLE-1)/MAX_VISIBLE);
         page=Math.max(0,Math.min(page,pages-1));
@@ -457,7 +457,7 @@ public final class FileBrowserActivity extends Activity {
             pad(cap,10,12);list.addView(cap);
         }
         if(isMedia()&&mediaTruncated){
-            TextView cap=label("Список файлов ограничен 5000, поиск папок — первыми 25 000 записями. Для полного доступа к старым файлам откройте нужную папку в разделе «Файлы».",12,muted,false);
+            TextView cap=label("Список файлов ограничен 12000, поиск папок — первыми 25 000 записями. Для полного доступа к старым файлам откройте нужную папку в разделе «Файлы».",12,muted,false);
             pad(cap,10,12);list.addView(cap);
         }
     }
@@ -560,7 +560,7 @@ public final class FileBrowserActivity extends Activity {
         if(selected.containsKey(key))selected.remove(key);
         else{
             if(selected.size()>=MAX_QUEUE){
-                Toast.makeText(this,"Не более 5000 объектов в одной операции",Toast.LENGTH_SHORT).show();
+                Toast.makeText(this,"Не более 12000 объектов в одной операции",Toast.LENGTH_SHORT).show();
                 return;
             }
             selected.put(key,e);
@@ -581,7 +581,7 @@ public final class FileBrowserActivity extends Activity {
             refreshIndicator(key);
         }
         updateCount();
-        if(capped)Toast.makeText(this,"Достигнут предел 5000 объектов",Toast.LENGTH_SHORT).show();
+        if(capped)Toast.makeText(this,"Достигнут предел 12000 объектов",Toast.LENGTH_SHORT).show();
     }
     private void clearSelection(){
         if(busy||selected.isEmpty())return;
@@ -672,7 +672,7 @@ public final class FileBrowserActivity extends Activity {
                                 if(used.add(f.uri))jobs.add(f);
                         }
                     }else addJob(jobs,used,e,e.path);
-                    if(jobs.size()>MAX_QUEUE)throw new IllegalStateException("Не более 5000 файлов в одной операции");
+                    if(jobs.size()>MAX_QUEUE)throw new IllegalStateException("Не более 12000 файлов в одной операции");
                 }
                 if(jobs.isEmpty())throw new IllegalStateException("В выбранных папках нет доступных файлов");
                 FileCatalog.append(this,jobs);

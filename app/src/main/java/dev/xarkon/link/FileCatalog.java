@@ -122,7 +122,7 @@ public final class FileCatalog {
         return result;
     }
     private static void collect(Context c,Uri tree,String docId,String path,ArrayList<Item> result,int depth)throws Exception{
-        if(depth>24||result.size()>5000)throw new IllegalStateException("Папка слишком велика: максимум 5000 файлов / 24 уровня");
+        if(depth>24||result.size()>12000)throw new IllegalStateException("Папка слишком велика: максимум 12000 файлов / 24 уровня");
         Uri children=DocumentsContract.buildChildDocumentsUriUsingTree(tree,docId);
         String[]cols={DocumentsContract.Document.COLUMN_DOCUMENT_ID,DocumentsContract.Document.COLUMN_DISPLAY_NAME,
                 DocumentsContract.Document.COLUMN_MIME_TYPE,DocumentsContract.Document.COLUMN_SIZE};
@@ -141,7 +141,7 @@ public final class FileCatalog {
                     it.path=path;it.status="В очереди";
                     it.size=cursor.isNull(3)?-1:cursor.getLong(3);
                     result.add(it);
-                    if(result.size()>5000)throw new IllegalStateException("Больше 5000 файлов");
+                    if(result.size()>12000)throw new IllegalStateException("Больше 12000 файлов");
                 }
             }
         }

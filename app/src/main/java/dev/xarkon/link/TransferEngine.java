@@ -184,9 +184,12 @@ public final class TransferEngine {
                     synchronized(inc){
                         // Replace the in-flight count with a committed chunk atomically
                         // before reporting. Retries never count unfinished chunks as done.
+                        // A chunk is resumable only after its bytes are durable and
+                        // the bitmap has been committed synchronously.
+                        channel.force(false);
                         inc.done.set(index);
+                        try{persist(inc);}catch(IOException failure){inc.done.clear(index);throw failure;}
                         inc.activeBytes.addAndGet(-partial);
-                        persist(inc);
                         finished=inc.done.cardinality()==inc.count;
                     }
                     if(finished)complete(inc);
@@ -242,7 +245,7 @@ public final class TransferEngine {
         long size=j.getLong("size");
         if(!id.matches("[0-9a-fA-F-]{36}")||size<0||size>1000L*1024*1024*1024*10||name.length()==0)
             throw new IOException("Некорректные параметры файла");
-        int count=(int)Math.max(1,((size+Util.CHUNK-1)/Util.CHUNK));
+        int count=ChunkState.count(size,Util.CHUNK);
         Incoming inc;
         synchronized(incoming){
             inc=incoming.get(id);
@@ -254,7 +257,11 @@ public final class TransferEngine {
                 Uri uri=context.getContentResolver().insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI,cv);
                 if(uri==null)throw new IOException("Не удалось создать файл в загрузках");
                 inc=new Incoming(id,name,path,mime,uri,size,count);
-                incoming.put(id,inc);persist(inc);
+                try{persist(inc);}catch(IOException failure){
+                    try{context.getContentResolver().delete(uri,null,null);}catch(Exception ignored){}
+                    throw failure;
+                }
+                incoming.put(id,inc);
                 events.note("Получение: "+(path.isEmpty()?"":path+"/")+name+" ("+Util.readable(size)+")");
             }
         }
@@ -276,7 +283,7 @@ public final class TransferEngine {
         FileOutputStream outputStream;
         FileChannel outputChannel;
         Incoming(String i,String n,String p,String m,Uri u,long s,int c){id=i;name=n;path=p;mime=m;uri=u;size=s;count=c;}
-        long bytesDone(){long sum=0;synchronized(this){for(int i=done.nextSetBit(0);i>=0;i=done.nextSetBit(i+1))sum+=Math.min(Util.CHUNK,size-(long)i*Util.CHUNK);}return sum;}
+        long bytesDone(){synchronized(this){return ChunkState.bytes(done,size,Util.CHUNK);}}
     }
     private FileChannel destination(Incoming inc)throws IOException{
         synchronized(inc){
@@ -316,21 +323,28 @@ public final class TransferEngine {
         long current=inc.bytesDone()+Math.max(0L,inc.activeBytes.get());
         events.progress("Приём: "+inc.name,Math.min(inc.size,current),inc.size,0);
     }
-    private synchronized void persist(Incoming inc){
+    private synchronized void persist(Incoming inc)throws IOException{
         try{
             JSONObject obj=new JSONObject();obj.put("name",inc.name).put("path",inc.path).put("mime",inc.mime)
                 .put("uri",inc.uri.toString()).put("size",inc.size)
                 .put("bits",Base64.encodeToString(inc.done.toByteArray(),Base64.NO_WRAP));
-            context.getSharedPreferences(SESSIONS,0).edit().putString(inc.id,obj.toString()).apply();
-        }catch(Exception ignored){}
+            if(!context.getSharedPreferences(SESSIONS,0).edit()
+                    .putString(inc.id,obj.toString()).commit())
+                throw new IOException("Не удалось сохранить карту принятых блоков");
+        }catch(IOException e){throw e;}
+        catch(Exception e){throw new IOException("Ошибка сохранения сеанса приёма",e);}
     }
     private void restore(){
         Map<String,?> prefs=context.getSharedPreferences(SESSIONS,0).getAll();
         for(Map.Entry<String,?>e:prefs.entrySet())try{
             JSONObject j=new JSONObject(String.valueOf(e.getValue()));long size=j.getLong("size");
-            int count=(int)Math.max(1,(size+Util.CHUNK-1)/Util.CHUNK);
-            Incoming in=new Incoming(e.getKey(),j.getString("name"),j.optString("path"),j.getString("mime"),Uri.parse(j.getString("uri")),size,count);
+            if(size<0||size>10L*1000*1024*1024*1024)continue;
+            Uri restoredUri=Uri.parse(j.getString("uri"));
+            if(!"content".equals(restoredUri.getScheme()))continue;
+            int count=ChunkState.count(size,Util.CHUNK);
+            Incoming in=new Incoming(e.getKey(),j.getString("name"),j.optString("path"),j.getString("mime"),restoredUri,size,count);
             in.done.or(BitSet.valueOf(Base64.decode(j.optString("bits",""),Base64.DEFAULT)));
+            ChunkState.validate(in.done,count);
             incoming.put(in.id,in);
         }catch(Exception ignored){}
     }
@@ -388,8 +402,9 @@ public final class TransferEngine {
             .put("path",job.path).put("mime",job.mime).put("size",job.size);
         JSONObject result=new JSONObject(Util.http(host,port,userPin,"/offer","POST",offer));
         if(result.getInt("chunk")!=Util.CHUNK)throw new IOException("Несовместимая версия протокола");
-        int blocks=(int)Math.max(1,(job.size+Util.CHUNK-1)/Util.CHUNK);
+        int blocks=ChunkState.count(job.size,Util.CHUNK);
         BitSet completed=BitSet.valueOf(Base64.decode(result.optString("done",""),Base64.DEFAULT));
+        ChunkState.validate(completed,blocks);
         ArrayList<Integer>todo=new ArrayList<>();long already=0;
         for(int i=0;i<blocks;i++){
             if(completed.get(i))already+=Math.min(Util.CHUNK,job.size-(long)i*Util.CHUNK);else todo.add(i);
