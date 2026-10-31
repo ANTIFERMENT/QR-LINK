@@ -1314,7 +1314,10 @@ public final class MainActivity extends Activity {
     @Override protected void onActivityResult(int req,int result,Intent data){super.onActivityResult(req,result,data);
         if(result!=RESULT_OK||data==null)return;
         if(req==SCAN){connectQr(data.getStringExtra("qr"));return;}
-        if(req==BROWSER){updateQueue();return;}
+        if(req==BROWSER){updateQueue();
+            if(paired())start(TransferService.SEND);
+            else toast("Файлы добавлены. Отсканируйте QR получателя.");
+            return;}
         try{
             if(req==FILES){ArrayList<FileCatalog.Item> files=new ArrayList<>();
                 if(data.getClipData()!=null){for(int i=0;i<data.getClipData().getItemCount();i++){

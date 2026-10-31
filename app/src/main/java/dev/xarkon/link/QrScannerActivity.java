@@ -20,6 +20,8 @@ public final class QrScannerActivity extends Activity implements SurfaceHolder.C
     private SurfaceView surface;
     private boolean previewReady, torchOn;
     private final AtomicBoolean decoding=new AtomicBoolean(false);
+    private final AtomicBoolean finished=new AtomicBoolean(false);
+    private final java.util.concurrent.ExecutorService decoder=java.util.concurrent.Executors.newSingleThreadExecutor();
     private volatile long lastDecode;
     private TextView notice;
     private int ink=0xffe5f4f5,background=0xff0b121b,accent=0xff5bdacb;
@@ -71,9 +73,29 @@ public final class QrScannerActivity extends Activity implements SurfaceHolder.C
     @Override public void surfaceDestroyed(SurfaceHolder h){previewReady=false;releaseCamera();}
     @Override protected void onPause(){releaseCamera();super.onPause();}
     @Override protected void onResume(){super.onResume();if(previewReady&&camera==null)openCamera();}
+    private int chooseMainRear(){
+        int selected=0;double best=Double.MAX_VALUE;
+        for(int id=0;id<Camera.getNumberOfCameras();id++){
+            Camera.CameraInfo info=new Camera.CameraInfo();
+            try{Camera.getCameraInfo(id,info);}catch(Exception e){continue;}
+            if(info.facing!=Camera.CameraInfo.CAMERA_FACING_BACK)continue;
+            if(best==Double.MAX_VALUE)selected=id;
+            try{
+                android.hardware.camera2.CameraManager manager=(android.hardware.camera2.CameraManager)getSystemService(CAMERA_SERVICE);
+                android.hardware.camera2.CameraCharacteristics cc=manager.getCameraCharacteristics(String.valueOf(id));
+                android.util.SizeF sensor=cc.get(android.hardware.camera2.CameraCharacteristics.SENSOR_INFO_PHYSICAL_SIZE);
+                float[] focal=cc.get(android.hardware.camera2.CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS);
+                if(sensor==null||focal==null||focal.length==0)continue;
+                double angle=Math.toDegrees(2d*Math.atan(sensor.getWidth()/(2d*focal[0])));
+                double score=Math.abs(angle-72d)+(angle>98d?100d:0d);
+                if(score<best){best=score;selected=id;}
+            }catch(Exception ignored){}
+        }
+        return selected;
+    }
     private void openCamera(){if(!previewReady||camera!=null)return;
         try{
-            camera=Camera.open();Camera.Parameters p=camera.getParameters();
+            int lens=chooseMainRear();camera=Camera.open(lens);Camera.Parameters p=camera.getParameters();
             List<Camera.Size> sizes=p.getSupportedPreviewSizes();Camera.Size best=null;
             if(sizes==null)throw new Exception("Нет поддерживаемых размеров камеры");
             for(Camera.Size s:sizes){if(s.width>=640&&s.width<=1280 && (best==null||s.width*s.height<best.width*best.height))best=s;}
@@ -81,7 +103,7 @@ public final class QrScannerActivity extends Activity implements SurfaceHolder.C
             if(p.getSupportedFocusModes()!=null&&p.getSupportedFocusModes().contains(Camera.Parameters.FOCUS_MODE_CONTINUOUS_PICTURE))
                 p.setFocusMode(Camera.Parameters.FOCUS_MODE_CONTINUOUS_PICTURE);
             p.setPreviewFormat(android.graphics.ImageFormat.NV21);camera.setParameters(p);
-            Camera.CameraInfo info=new Camera.CameraInfo();Camera.getCameraInfo(0,info);
+            Camera.CameraInfo info=new Camera.CameraInfo();Camera.getCameraInfo(lens,info);
             int rotation=getWindowManager().getDefaultDisplay().getRotation();int degrees=rotation==Surface.ROTATION_90?90:rotation==Surface.ROTATION_180?180:rotation==Surface.ROTATION_270?270:0;
             int orientation=(info.orientation-degrees+360)%360;
             camera.setDisplayOrientation(orientation);
@@ -94,25 +116,26 @@ public final class QrScannerActivity extends Activity implements SurfaceHolder.C
         torchOn=!torchOn;p.setFlashMode(torchOn?Camera.Parameters.FLASH_MODE_TORCH:Camera.Parameters.FLASH_MODE_OFF);camera.setParameters(p);
     }catch(Exception ignored){}}
     @Override public void onPreviewFrame(byte[] data,Camera c){
-        if(data==null||decoding.get()||android.os.SystemClock.elapsedRealtime()-lastDecode<350)return;
+        if(data==null||finished.get()||decoding.get()||android.os.SystemClock.elapsedRealtime()-lastDecode<90)return;
         Camera.Parameters p;try{p=c.getParameters();}catch(Exception e){return;}
         Camera.Size s=p.getPreviewSize();if(s==null)return;
         if(!decoding.compareAndSet(false,true))return;
         lastDecode=android.os.SystemClock.elapsedRealtime();
         final int w=s.width,h=s.height;final byte[] frame=Arrays.copyOf(data,w*h);
-        new Thread(()->{try{
+        decoder.execute(()->{try{
             String found=decodeY(frame,w,h);
-            if(found!=null)runOnUiThread(()->finishWith(found));
-        }catch(Exception ignored){}finally{decoding.set(false);}},"qr-decode").start();
+            if(found!=null&&!finished.get())runOnUiThread(()->finishWith(found));
+        }catch(Exception ignored){}finally{decoding.set(false);}});
     }
     private String decodeY(byte[] y,int width,int height){
         try{
+            String immediate=decodeSource(new PlanarYUVLuminanceSource(y,width,height,0,0,width,height,false));
+            if(immediate!=null)return immediate;
             byte[] rotated=new byte[y.length];
             for(int j=0;j<height;j++)for(int i=0;i<width;i++)rotated[i*height+(height-1-j)]=y[j*width+i];
             String found=decodeSource(new PlanarYUVLuminanceSource(rotated,height,width,0,0,height,width,false));
             if(found!=null)return found;
-            found=decodeSource(new PlanarYUVLuminanceSource(y,width,height,0,0,width,height,false));
-            if(found!=null)return found;
+            // Unrotated frame was already checked.
             for(int j=0;j<height;j++)for(int i=0;i<width;i++)rotated[(width-i-1)*height+j]=y[j*width+i];
             return decodeSource(new PlanarYUVLuminanceSource(rotated,height,width,0,0,height,width,false));
         }catch(Exception e){return null;}
@@ -125,7 +148,9 @@ public final class QrScannerActivity extends Activity implements SurfaceHolder.C
         return new MultiFormatReader().decode(bitmap,hints).getText();
     }catch(Exception e){return null;}}
     private void finishWith(String value){try{Pairing.parse(value);}catch(Exception e){notice.setText("Неверный QR: "+e.getMessage());return;}
+        if(!finished.compareAndSet(false,true))return;
         setResult(RESULT_OK,new Intent().putExtra("qr",value));finish();}
+    @Override protected void onDestroy(){decoder.shutdownNow();super.onDestroy();}
     @Override protected void onActivityResult(int req,int result,Intent data){super.onActivityResult(req,result,data);
         if(req!=22||result!=RESULT_OK||data==null||data.getData()==null)return;
         try{Uri uri=data.getData();android.graphics.Bitmap bitmap;

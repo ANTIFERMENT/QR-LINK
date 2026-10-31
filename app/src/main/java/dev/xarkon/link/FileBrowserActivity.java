@@ -125,8 +125,14 @@ public final class FileBrowserActivity extends Activity {
         tools.addView(search,new LinearLayout.LayoutParams(0,dp(48),1));
         sortButton=label("↕",22,accent,true);sortButton.setGravity(Gravity.CENTER);
         tools.addView(sortButton,new LinearLayout.LayoutParams(dp(52),dp(48)));
-        sortButton.setOnClickListener(v->{sort=(sort+1)%3;page=0;render();Toast.makeText(this,
-            sort==0?"По имени":sort==1?"По размеру":"По дате",Toast.LENGTH_SHORT).show();});
+        sortButton.setContentDescription("Сортировка файлов");
+        sortButton.setOnClickListener(v->{
+            PopupMenu menu=new PopupMenu(this,sortButton);
+            menu.getMenu().add(0,0,0,"Имя");menu.getMenu().add(0,2,1,"Дата");
+            menu.getMenu().add(0,1,2,"Размер");menu.getMenu().add(0,3,3,"Тип");
+            menu.setOnMenuItemClickListener(item->{sort=item.getItemId();page=0;render();return true;});
+            menu.show();
+        });
         root.addView(tools);
         search.addTextChangedListener(new TextWatcher(){
             public void beforeTextChanged(CharSequence s,int start,int c,int after){}
@@ -156,7 +162,7 @@ public final class FileBrowserActivity extends Activity {
         clear.setGravity(Gravity.CENTER);clear.setBackground(shape(bg,stroke,11));
         selectionTools.addView(clear,new LinearLayout.LayoutParams(0,-1,1));
         clear.setOnClickListener(v->clearSelection());
-        action=label("ДОБАВИТЬ В ОЧЕРЕДЬ",15,Color.BLACK,true);
+        action=label("ОТПРАВИТЬ",15,Color.BLACK,true);
         action.setGravity(Gravity.CENTER);pad(action,12,15);
         LinearLayout.LayoutParams ap=new LinearLayout.LayoutParams(-1,dp(52));
         ap.topMargin=dp(9);footer.addView(action,ap);
@@ -421,6 +427,8 @@ public final class FileBrowserActivity extends Activity {
             if(a.folder!=b.folder)return a.folder?-1:1;
             if(sort==1)return Long.compare(b.size,a.size);
             if(sort==2)return Long.compare(b.date,a.date);
+            if(sort==3){String am=a.mime==null?"":a.mime,bm=b.mime==null?"":b.mime;
+                int r=am.compareToIgnoreCase(bm);if(r!=0)return r;}
             return a.name.compareToIgnoreCase(b.name);
         };
         Collections.sort(rows,cmp);
@@ -670,7 +678,7 @@ public final class FileBrowserActivity extends Activity {
                 FileCatalog.append(this,jobs);
                 ui.post(()->{setResult(RESULT_OK,new Intent());finish();});
             }catch(Exception e){
-                ui.post(()->{busy=false;action.setText("ДОБАВИТЬ В ОЧЕРЕДЬ");
+                ui.post(()->{busy=false;action.setText("ОТПРАВИТЬ");
                     updateCount();Toast.makeText(this,"Ошибка: "+e.getMessage(),Toast.LENGTH_LONG).show();});
             }
         });

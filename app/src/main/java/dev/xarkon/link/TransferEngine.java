@@ -29,6 +29,9 @@ public final class TransferEngine {
     }
     private final ConcurrentHashMap<String,BadPin> lastBadPin=new ConcurrentHashMap<>();
     private volatile boolean alive;
+    private volatile boolean sendingCancelled;
+    /** Cancels sending, not the pairing or receiver. */
+    public void cancelSending(){sendingCancelled=true;}
     private volatile String sessionKey="";
     private ServerSocket socket;
     private DatagramSocket discovery;
@@ -356,15 +359,23 @@ public final class TransferEngine {
     }
 
     public void send(String host,int port,String userPin,List<FileCatalog.Item> jobs,int lanes)throws Exception{
+        sendingCancelled=false;
         JSONObject hello=new JSONObject(Util.http(host,port,userPin,"/hello","GET",null));
         if(!"XARKON LINK".equals(hello.optString("app")))throw new IOException("Это не совместимый приёмник QR LINK");
         final boolean verifySha=hello.optBoolean("sha256",false);
         int failed=0;
         for(FileCatalog.Item job:jobs){
-            if(Thread.currentThread().isInterrupted())throw new InterruptedException();
+            if(sendingCancelled||Thread.currentThread().isInterrupted()){
+                events.note("Передача остановлена. Очередь сохранена.");return;
+            }
             if(job.size<0){failed++;FileCatalog.setStatus(context,job.id,"Ошибка: неизвестный размер");events.note("Пропуск: неизвестный размер файла "+job.name);continue;}
             try{sendOne(host,port,userPin,job,lanes,verifySha);FileCatalog.setStatus(context,job.id,"Передан");events.note("Отправлено: "+job.name);}
-            catch(Exception e){failed++;FileCatalog.setStatus(context,job.id,"Ошибка: "+e.getMessage());events.note("Ошибка отправки "+job.name+": "+e.getMessage());}
+            catch(Exception e){
+                if(sendingCancelled){FileCatalog.setStatus(context,job.id,"Приостановлен");
+                    events.note("Передача остановлена. Можно продолжить позже.");return;}
+                failed++;FileCatalog.setStatus(context,job.id,"Ошибка: "+e.getMessage());
+                events.note("Ошибка отправки "+job.name+": "+e.getMessage());
+            }
         }
         if(failed>0)throw new IOException("Не удалось передать "+failed+" из "+jobs.size()+" файлов. Проверьте очередь.");
     }
@@ -412,11 +423,13 @@ public final class TransferEngine {
             Iterator<Integer> pending=todo.iterator();
             int active=0;
             while(pending.hasNext()||active>0){
+                if(sendingCancelled)throw new IOException("Передача остановлена");
                 while(active<parallel&&pending.hasNext()){
                     final int ix=pending.next();
                     completions.submit(()->{
                     Exception last=null;
                     for(int attempt=0;attempt<3;attempt++){
+                        if(sendingCancelled)throw new IOException("Передача остановлена");
                         try{
                             AtomicLong thisAttempt=new AtomicLong();
                             try{
@@ -484,6 +497,7 @@ public final class TransferEngine {
                 if(sharedSource!=null){
                     long position=offset;
                     while(rem>0){
+                        if(sendingCancelled||Thread.currentThread().isInterrupted())throw new IOException("Передача остановлена");
                         ByteBuffer b=ByteBuffer.wrap(buf,0,(int)Math.min(buf.length,rem));
                         int n=sharedSource.read(b,position);
                         if(n<=0)throw new EOFException("Не удалось прочитать исходный файл");
@@ -496,6 +510,7 @@ public final class TransferEngine {
                         if(raw==null)throw new IOException("Нет доступа к файлу");
                         position(raw,offset);
                         while(rem>0){
+                            if(sendingCancelled||Thread.currentThread().isInterrupted())throw new IOException("Передача остановлена");
                             int n=raw.read(buf,0,(int)Math.min(buf.length,rem));
                             if(n<=0)throw new EOFException("Файл источника укорочен");
                             checksum.update(buf,0,n);

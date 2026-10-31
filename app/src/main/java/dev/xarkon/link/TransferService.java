@@ -307,7 +307,9 @@ public final class TransferService extends Service implements TransferEngine.Eve
         isBusy=true;status="Подготовка...";lock();refresh();
         work.submit(()->{
             try{job.run();}catch(Exception e){note("Ошибка: "+e.getMessage());}
-            finally{isBusy=false;busy.set(false);progress=0;total=0;bytesPerSecond=0;activeFile="";transferDirection="";
+            finally{isBusy=false;busy.set(false);
+                // Keep last transfer figures visible after completion.
+                if(transferDirection.isEmpty()){progress=0;total=0;bytesPerSecond=0;activeFile="";}
                 status=isReceiving?(directReady?"Wi-Fi Direct активен": "Приём включён · "+Util.ip()+":"+Util.PORT):
                     (!peerState.isEmpty()?peerState:"Готов к работе");
                 unlockIfIdle();refresh();}
