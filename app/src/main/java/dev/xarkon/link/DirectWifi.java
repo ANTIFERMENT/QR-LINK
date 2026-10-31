@@ -80,6 +80,15 @@ public final class DirectWifi {
         return context.checkSelfPermission(Build.VERSION.SDK_INT>=33?
             Manifest.permission.NEARBY_WIFI_DEVICES:Manifest.permission.ACCESS_FINE_LOCATION)==PackageManager.PERMISSION_GRANTED;
     }
+    public boolean available(){return check().isEmpty();}
+    /** Verify group ownership, instead of treating a cached callback as connected. */
+    public void confirmHosting(String ssid,java.util.function.Consumer<Boolean> cb){
+        if(manager==null||channel==null||!WifiState.radioOn(context)){cb.accept(false);return;}
+        try{
+            manager.requestGroupInfo(channel,group->cb.accept(group!=null&&
+                group.isGroupOwner()&&ssid!=null&&ssid.equals(group.getNetworkName())));
+        }catch(Exception error){cb.accept(false);}
+    }
     private String check(){
         if(manager==null||channel==null)return "Wi-Fi Direct отсутствует в прошивке телефона";
         if(!context.getPackageManager().hasSystemFeature(PackageManager.FEATURE_WIFI_DIRECT))
@@ -90,9 +99,9 @@ public final class DirectWifi {
         return "";
     }
     private static String actionError(int reason){
-        if(reason==WifiP2pManager.BUSY)return "система занята (BUSY)";
-        if(reason==WifiP2pManager.P2P_UNSUPPORTED)return "Wi-Fi Direct не поддерживается (P2P_UNSUPPORTED)";
-        if(reason==WifiP2pManager.ERROR)return "ошибка драйвера или системного Wi-Fi (ERROR)";
+        if(reason==WifiP2pManager.BUSY)return "радиомодуль занят";
+        if(reason==WifiP2pManager.P2P_UNSUPPORTED)return "Wi-Fi Direct не поддерживается";
+        if(reason==WifiP2pManager.ERROR)return "ошибка драйвера или Wi-Fi";
         return "код "+reason;
     }
     public void host(HostListener listener){

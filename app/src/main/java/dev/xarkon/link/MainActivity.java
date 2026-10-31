@@ -202,6 +202,7 @@ public final class MainActivity extends Activity {
             if(y>0)scroller.post(()->scroller.scrollTo(0,y));
         }
         incomingShare(getIntent());
+        handlePairLink(getIntent());
         OtaUpdateSchedule.configure(this);
         consumeUpdateNotification(getIntent());
     }
@@ -222,6 +223,7 @@ public final class MainActivity extends Activity {
             navigate(HOME);
         }
         incomingShare(intent);
+        handlePairLink(intent);
         consumeUpdateNotification(intent);
     }
     @Override protected void onResume(){
@@ -1170,37 +1172,56 @@ public final class MainActivity extends Activity {
     }
     private void renderQr(){if(qrImage==null||receiveHint==null)return;
         if(networkBadge!=null){
-            networkBadge.setText(TransferService.directReady?"WI-FI DIRECT АКТИВЕН":
+            networkBadge.setText(!WifiState.localTransferReady(this)?"WI-FI ВЫКЛЮЧЕН":
+                TransferService.hotspotReady?"ТОЧКА ДОСТУПА ГОТОВА":
+                TransferService.hotspotStarting?"СОЗДАЁМ ТОЧКУ ДОСТУПА":
+                TransferService.directReady?"WI-FI DIRECT АКТИВЕН":
                 !TransferService.systemApHost.isEmpty()?"СИСТЕМНАЯ ТОЧКА ДОСТУПА":
                 !WifiState.radioOn(this)?"WI-FI ВЫКЛЮЧЕН":
                 TransferService.directStarting?"СОЗДАЁМ WI-FI DIRECT...":
                 WifiState.clientConnected(this)?"ОБЩАЯ СЕТЬ WI-FI":"ОЖИДАЕМ WI-FI DIRECT");
         }
         String key=TransferService.receiveKey;
+        if(!WifiState.localTransferReady(this)){
+            receiveHint.setText("Wi-Fi выключен");
+            qrImage.setImageDrawable(null);lastQr="";
+            receiveCaption.setText("Включите Wi-Fi. QR появится после создания соединения.");
+            return;
+        }
         if(!TransferService.isReceiving||key.isEmpty()){
             receiveHint.setText("Приём не запущен");qrImage.setImageDrawable(null);lastQr="";
             if(receiveCaption!=null)receiveCaption.setText("Нажмите «Получить» ещё раз. "+TransferService.detail);
             return;
         }
         boolean direct=TransferService.directReady;
-        if(TransferService.directStarting){
-            receiveHint.setText("Создаём группу Wi-Fi Direct...");qrImage.setImageDrawable(null);lastQr="";
-            receiveCaption.setText("Wi-Fi должен быть включён, но подключаться к роутеру не нужно. Подождите подтверждения Android.");return;
+        if(TransferService.directStarting||TransferService.hotspotStarting){
+            receiveHint.setText(TransferService.directStarting?"Создаём Wi-Fi Direct...":"Создаём точку доступа...");
+            qrImage.setImageDrawable(null);lastQr="";
+            receiveCaption.setText("QR появится после подтверждения готовности сети.");return;
         }
         boolean externalAp=!TransferService.systemApHost.isEmpty();
-        String host=direct?TransferService.directHost:(externalAp?TransferService.systemApHost:Util.ip());
+        boolean localAp=TransferService.hotspotReady;
+        String host=direct?TransferService.directHost:(localAp?TransferService.hotspotHost:
+            externalAp?TransferService.systemApHost:Util.ip());
+        if(localAp&&host.isEmpty()){
+            receiveHint.setText("Ожидаем адрес локальной точки доступа...");
+            qrImage.setImageDrawable(null);lastQr="";return;
+        }
         if(externalAp&&!host.equals(WifiState.hostedApAddress(this))){
             receiveHint.setText("Системная точка доступа отключилась");
             qrImage.setImageDrawable(null);lastQr="";
             receiveCaption.setText("Включите точку доступа и обновите QR-код.");return;
         }
-        if(!direct&&!externalAp&&(!WifiState.clientConnected(this)||
+        if(!direct&&!externalAp&&!localAp&&(!WifiState.clientConnected(this)||
             "127.0.0.1".equals(host)||host.isEmpty())){
             receiveHint.setText("Локальная сеть не обнаружена");qrImage.setImageDrawable(null);lastQr="";
             receiveCaption.setText("Создание Wi-Fi Direct не завершилось. "+TransferService.detail+" Если Wi-Fi выключен, включите его, затем обновите QR.");return;
         }
         String value=direct?Pairing.buildDirect(host,key,TransferService.directMac,
-            TransferService.directSsid,TransferService.directPass):Pairing.build(host,key);
+            TransferService.directSsid,TransferService.directPass):localAp?
+            Pairing.buildHotspot(host,key,TransferService.hotspotSsid,
+                TransferService.hotspotPassword,TransferService.hotspotSecurity):
+            Pairing.build(host,key);
         if(!value.equals(lastQr)){
             try{qrImage.setImageBitmap(makeQr(value));lastQr=value;
                 if(motion()){
@@ -1210,7 +1231,10 @@ public final class MainActivity extends Activity {
                 }
             }catch(Exception e){receiveHint.setText("Ошибка QR: "+e.getMessage());return;}
         }
-        if(externalAp){
+        if(localAp){
+            receiveHint.setText("Локальная точка доступа · готово");
+            receiveCaption.setText("Отсканируйте QR на отправителе. При необходимости подтвердите подключение Android.");
+        }else if(externalAp){
             receiveHint.setText("Системная точка доступа · приём готов");
             receiveCaption.setText("Подключите второй телефон к этой точке доступа через Android, затем отсканируйте QR LINK. Данные системной точки доступа защищены самой ОС.");
         }else if(direct){
@@ -1305,6 +1329,15 @@ public final class MainActivity extends Activity {
         }catch(Exception e){toast("Ошибка выбора: "+e.getMessage());}
     }
     private void persist(Uri u){try{getContentResolver().takePersistableUriPermission(u,Intent.FLAG_GRANT_READ_URI_PERMISSION);}catch(Exception ignored){}}
+    /** BROWSABLE URI allows compatible camera and QR-reader apps to open QR LINK directly. */
+    private void handlePairLink(Intent intent){
+        if(intent==null||!Intent.ACTION_VIEW.equals(intent.getAction()))return;
+        android.net.Uri uri=intent.getData();
+        if(uri==null||!"xarkonlink".equals(uri.getScheme())||
+            !"pair".equals(uri.getHost()))return;
+        intent.setData(null);intent.setAction(Intent.ACTION_MAIN);
+        handler.post(()->connectQr(uri.toString()));
+    }
     private void incomingShare(Intent i){if(i==null)return;String action=i.getAction();
         if(!Intent.ACTION_SEND.equals(action)&&!Intent.ACTION_SEND_MULTIPLE.equals(action))return;
         ArrayList<FileCatalog.Item> list=new ArrayList<>();

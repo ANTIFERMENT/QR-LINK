@@ -14,6 +14,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 public final class TransferService extends Service implements TransferEngine.Events {
     public static final String RECEIVE="dev.xarkon.link.RECEIVE",STOP="dev.xarkon.link.STOP",SEND="dev.xarkon.link.SEND";
     public static final String CONNECT="dev.xarkon.link.CONNECT";
+    public static final String CANCEL_SEND="dev.xarkon.link.CANCEL_SEND";
     public static final String BENCH="dev.xarkon.link.BENCH",FTP="dev.xarkon.link.FTP",ROTATE="dev.xarkon.link.ROTATE";
     public static volatile String status="Служба выключена",detail="",receiveKey="";
     public static volatile long progress=0,total=0;
@@ -26,6 +27,37 @@ public final class TransferService extends Service implements TransferEngine.Eve
     private static final String CHANNEL="xarkon_transfer";
     private static final int NOTIFICATION=118;
     private final AtomicBoolean busy=new AtomicBoolean();
+    private final Handler networkHandler=new Handler(Looper.getMainLooper());
+    private boolean wantReceive;
+    private boolean groupProbeRunning;
+    private final Runnable networkWatch=new Runnable(){
+        @Override public void run(){
+            try{
+                if(wantReceive){
+                    if(!WifiState.localTransferReady(TransferService.this)){
+                        if(isReceiving||directReady||hotspotReady){
+                            engine.stop();directWifi.close();hotspot.stop();resetDirect();resetHotspot();
+                            systemApHost="";receiveKey="";isReceiving=false;
+                            status="Wi-Fi выключен · ожидание включения";refresh();
+                        }
+                    }else if(!isReceiving){
+                        networkHandler.post(()->onStartCommand(
+                            new Intent(TransferService.this,TransferService.class).setAction(RECEIVE),0,0));
+                    }else if(directReady&&!groupProbeRunning){
+                        groupProbeRunning=true;
+                        directWifi.confirmHosting(directSsid,valid->{
+                            groupProbeRunning=false;
+                            if(!valid&&wantReceive&&directReady){
+                                resetDirect();directWifi.close();
+                                status="Соединение Wi-Fi Direct потеряно · восстанавливаем";refresh();
+                                establishNetworkRoute();
+                            }
+                        });
+                    }
+                }
+            }finally{networkHandler.postDelayed(this,1700L);}
+        }
+    };
     private final ExecutorService work=Executors.newSingleThreadExecutor();
     private TransferEngine engine;
     private PowerManager.WakeLock wake;
@@ -48,6 +80,8 @@ public final class TransferService extends Service implements TransferEngine.Eve
         hotspot=new HotspotSupport(this);
         wifiPeer=new WifiPeerConnector(this);
         directWifi=new DirectWifi(this);
+        wantReceive=getSharedPreferences("settings",0).getBoolean("receive_desired",false);
+        networkHandler.postDelayed(networkWatch,1200L);
     }
     private Notification notification(){
         Intent intent=new Intent(this,MainActivity.class);
@@ -88,15 +122,24 @@ public final class TransferService extends Service implements TransferEngine.Eve
     @Override public int onStartCommand(Intent in,int flags,int startId){
         if(in==null)return START_NOT_STICKY;
         String action=in.getAction();
+        if(CANCEL_SEND.equals(action)){
+            engine.cancelSending();
+            status="Останавливаем передачу · соединение сохранено";refresh();
+            return START_NOT_STICKY;
+        }
         if(STOP.equals(action)){
+            wantReceive=false;getSharedPreferences("settings",0).edit().putBoolean("receive_desired",false).apply();
             engine.stop();hotspot.stop();wifiPeer.stop();directWifi.close();resetHotspot();resetDirect();systemApHost="";isReceiving=false;receiveKey="";peerState="";activeFile="";transferDirection="";progress=0;total=0;status="Служба остановлена";
             unlock();stopForeground(STOP_FOREGROUND_REMOVE);stopSelf();MainActivity.changed();return START_NOT_STICKY;
         }
         foreground();
         if(RECEIVE.equals(action)||ROTATE.equals(action)){
             try{
+                wantReceive=true;getSharedPreferences("settings",0).edit().putBoolean("receive_desired",true).apply();
                 if(!WifiState.localTransferReady(this)){
-                    note("Wi-Fi выключен, точка доступа не обнаружена. Включите Wi-Fi.");
+                    engine.stop();directWifi.close();hotspot.stop();resetDirect();resetHotspot();
+                    systemApHost="";isReceiving=false;receiveKey="";
+                    note("Wi-Fi выключен. После включения приём запустится автоматически.");
                     return START_NOT_STICKY;
                 }
                 if(ROTATE.equals(action)){engine.stop();isReceiving=false;receiveKey="";}
@@ -106,29 +149,7 @@ public final class TransferService extends Service implements TransferEngine.Eve
                     receiveKey=hex.toString();engine.start(receiveKey);isReceiving=true;
                 }
                 lock();
-                if(directReady){systemApHost="";status="Wi-Fi Direct · ожидание отправителя";refresh();}
-                else if(!WifiState.hostedApAddress(this).isEmpty()){
-                    systemApHost=WifiState.hostedApAddress(this);
-                    status="Системная точка доступа · "+systemApHost+":"+Util.PORT;refresh();
-                }else if(!WifiState.clientConnected(this)){
-                    systemApHost="";
-                    status="Создаём Wi-Fi Direct группу...";refresh();
-                    if(!directStarting){
-                        directStarting=true;directWifi.host(new DirectWifi.HostListener(){
-                            @Override public void ready(String mac,String ssid,String pass,String host){
-                                directReady=true;directStarting=false;directMac=mac;directSsid=ssid;
-                                directPass=pass;directHost=host;
-                                status="Wi-Fi Direct активен · покажите QR";refresh();
-                            }
-                            @Override public void failure(String reason){
-                                resetDirect();note(reason);
-                            }
-                        });
-                    }
-                }else{
-                    systemApHost="";
-                    status="Приём по общей Wi-Fi сети · "+Util.ip()+":"+Util.PORT;refresh();
-                }
+                establishNetworkRoute();
             }catch(Exception e){note("Не удалось запустить приём: "+e.getMessage());}
         }else if(CONNECT.equals(action)){
             if(!WifiState.localTransferReady(this)){
@@ -185,6 +206,70 @@ public final class TransferService extends Service implements TransferEngine.Eve
             try(FtpBridge ftp=new FtpBridge(this,url)){ftp.download(dir,name,this);}
         });
         return START_NOT_STICKY;
+    }
+    /** Direct is preferred even when both phones are connected to different routers.
+     * An existing system hotspot takes priority. LocalOnlyHotspot is the fallback.
+     */
+    private void establishNetworkRoute(){
+        if(!wantReceive||!isReceiving)return;
+        String external=WifiState.hostedApAddress(this);
+        if(!external.isEmpty()){
+            directWifi.close();hotspot.stop();resetDirect();resetHotspot();
+            systemApHost=external;status="Системная точка доступа · готов к приёму";refresh();return;
+        }
+        systemApHost="";
+        if(directReady){
+            status="Wi-Fi Direct · ожидание отправителя";refresh();return;
+        }
+        if(directStarting||hotspotStarting)return;
+        if(directWifi.available()){
+            directStarting=true;status="Создаём прямое соединение...";refresh();
+            directWifi.host(new DirectWifi.HostListener(){
+                @Override public void ready(String mac,String ssid,String pass,String host){
+                    if(!wantReceive)return;
+                    directReady=true;directStarting=false;directMac=mac;directSsid=ssid;
+                    directPass=pass;directHost=host;
+                    status="Wi-Fi Direct готов · покажите QR";refresh();
+                }
+                @Override public void failure(String reason){
+                    resetDirect();startHotspotFallback(reason);
+                }
+            });
+        }else startHotspotFallback("Wi-Fi Direct недоступен");
+    }
+    private void startHotspotFallback(String reason){
+        if(!wantReceive||!isReceiving)return;
+        if(hotspotReady||hotspotStarting)return;
+        hotspotStarting=true;
+        status="Создаём локальную точку доступа...";detail=reason;refresh();
+        hotspot.start(new HotspotSupport.Listener(){
+            @Override public void ready(String ssid,String pass,int security,String host){
+                if(!wantReceive){hotspot.stop();return;}
+                hotspotStarting=false;hotspotReady=true;
+                hotspotSsid=ssid;hotspotPassword=pass;hotspotSecurity=security;
+                hotspotHost=host;
+                status="Локальная точка доступа готова";refresh();
+                if(hotspotHost.isEmpty())networkHandler.postDelayed(()->resolveHotspotAddress(0),250);
+            }
+            @Override public void failure(String why){
+                resetHotspot();
+                if(WifiState.clientConnected(TransferService.this)){
+                    status="Приём через общую сеть Wi-Fi";detail=why;
+                }else{
+                    status="Не удалось создать соединение";
+                    detail="Wi-Fi Direct и локальная точка недоступны: "+why;
+                }
+                refresh();
+            }
+        });
+    }
+    private void resolveHotspotAddress(int attempt){
+        if(!hotspotReady||!wantReceive)return;
+        String ip=HotspotSupport.hotspotIp();
+        if(!ip.isEmpty()){hotspotHost=ip;refresh();return;}
+        if(attempt<24)networkHandler.postDelayed(()->resolveHotspotAddress(attempt+1),250);
+        else{status="Локальная точка доступа без адреса";
+            detail="Android не сообщил IP. Перезапустите приём.";refresh();}
     }
     private void fallbackWifi(Pairing.Info info){
         peerState="Подключение к сети приёмника. Может потребоваться подтверждение Android";refresh();
@@ -266,7 +351,7 @@ public final class TransferService extends Service implements TransferEngine.Eve
     private void resetDirect(){directReady=false;directStarting=false;directMac="";directSsid="";
         directPass="";directHost="";MainActivity.changed();}
     private void resetHotspot(){hotspotReady=false;hotspotStarting=false;hotspotSsid="";hotspotPassword="";hotspotHost="";hotspotSecurity=0;MainActivity.changed();}
-    @Override public void onDestroy(){engine.shutdown();hotspot.stop();wifiPeer.stop();directWifi.destroy();resetHotspot();resetDirect();systemApHost="";work.shutdownNow();unlock();
+    @Override public void onDestroy(){networkHandler.removeCallbacks(networkWatch);engine.shutdown();hotspot.stop();wifiPeer.stop();directWifi.destroy();resetHotspot();resetDirect();systemApHost="";work.shutdownNow();unlock();
         isReceiving=false;isBusy=false;receiveKey="";activeFile="";transferDirection="";progress=0;total=0;status="Служба выключена";MainActivity.changed();super.onDestroy();}
     @Override public IBinder onBind(Intent i){return null;}
 }
