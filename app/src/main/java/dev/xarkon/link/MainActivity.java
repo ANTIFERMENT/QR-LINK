@@ -69,7 +69,10 @@ public final class MainActivity extends Activity {
     };
     private LinearLayout content,root;
     private TextView status,progressText,queueLabel,pairLabel,receiveHint,receiveCaption,networkBadge;
-    private TextView transferName,transferPercent,transferSize,transferRate;
+    private TextView transferName,transferPercent,transferSize,transferRate,transferHeading;
+    private LinearLayout transferCard;
+    private ListView transferFileList;
+    private ArrayAdapter<String> transferFileAdapter;
     private long visibleBytes;
     private String visibleFile="";
     private double visibleRate;
@@ -508,6 +511,7 @@ public final class MainActivity extends Activity {
     private void renderScreen(){
         theme();lastQr="";status=null;progress=null;progressText=null;transferName=null;transferPercent=null;transferSize=null;transferRate=null;pairLabel=null;queueLabel=null;
         qrImage=null;receiveHint=null;receiveCaption=null;networkBadge=null;
+        transferCard=null;transferHeading=null;transferFileList=null;transferFileAdapter=null;
         backgroundCheckStatus=null;
         homeUpdatePanel=null;homeUpdateVersion=null;
         scroller=new ScrollView(this);scroller.setFillViewport(true);scroller.setClipToPadding(false);
@@ -660,11 +664,17 @@ public final class MainActivity extends Activity {
     private void liveStatus(){
         LinearLayout box=column();box.setPadding(dp(18),dp(18),dp(18),dp(17));
         box.setBackground(shape(card,stroke,22));margin(content,box,17);
+        transferCard=box;box.setVisibility(View.GONE);
+        transferHeading=text(page==RECEIVE?"Получение файлов":"Передача файлов",18,fg,true);
+        box.addView(transferHeading);space(box,14);
         LinearLayout top=row();top.setGravity(Gravity.CENTER_VERTICAL);
         UiIcon glyph=icon("file",accent,25);top.addView(glyph);
         LinearLayout nameBlock=column();nameBlock.setPadding(dp(12),0,dp(8),0);
-        transferName=text("Ожидание передачи",16,fg,true);
-        transferName.setSingleLine(true);transferName.setEllipsize(android.text.TextUtils.TruncateAt.MIDDLE);
+        transferName=text("",16,fg,true);
+        transferName.setSingleLine(true);
+        transferName.setEllipsize(android.text.TextUtils.TruncateAt.MARQUEE);
+        transferName.setMarqueeRepeatLimit(-1);
+        transferName.setSelected(true);
         nameBlock.addView(transferName);
         top.addView(nameBlock,new LinearLayout.LayoutParams(0,-2,1));
         transferPercent=text("0%",20,accent,true);
@@ -685,6 +695,21 @@ public final class MainActivity extends Activity {
         // Kept for compatibility with the existing update tick.
         progressText=text("",11,muted,false);
         progressText.setVisibility(View.GONE);box.addView(progressText);
+        if(page==SEND){
+            space(box,14);box.addView(text("ФАЙЛЫ В ОЧЕРЕДИ",11,muted,true));space(box,7);
+            transferFileAdapter=new ArrayAdapter<String>(this,android.R.layout.simple_list_item_1){
+                @Override public View getView(int position,View convertView,ViewGroup parent){
+                    TextView row=(TextView)super.getView(position,convertView,parent);
+                    row.setTextColor(fg);row.setTextSize(12);row.setSingleLine(true);
+                    row.setEllipsize(android.text.TextUtils.TruncateAt.MIDDLE);return row;
+                }
+            };
+            transferFileAdapter.setNotifyOnChange(false);
+            transferFileList=new ListView(this);transferFileList.setAdapter(transferFileAdapter);
+            transferFileList.setBackground(shape(soft,stroke,13));
+            transferFileList.setDividerHeight(0);transferFileList.setNestedScrollingEnabled(true);
+            box.addView(transferFileList,new LinearLayout.LayoutParams(-1,dp(185)));
+        }
     }
     private boolean paired(){return prefs().getString("key","").matches("[0-9a-f]{64}")&&!prefs().getString("host","").isEmpty();}
     private void sendPage(){
@@ -702,6 +727,7 @@ public final class MainActivity extends Activity {
             if(FileCatalog.load(this).isEmpty()){toast("Добавьте файлы или папку");return;}
             start(TransferService.SEND);
         });
+        outlineButton(queue,"trash","ОСТАНОВИТЬ ПЕРЕДАЧУ",()->start(TransferService.CANCEL_SEND));
         outlineButton(queue,"trash","Очистить очередь",()->new AlertDialog.Builder(this).setTitle("Очистить очередь?")
             .setMessage("Исходные файлы не удалятся.").setNegativeButton("Отмена",null)
             .setPositiveButton("Очистить",(d,w)->{FileCatalog.save(this,new ArrayList<>());updateQueue();}).show());
@@ -1127,10 +1153,25 @@ public final class MainActivity extends Activity {
             if(f.status.startsWith("Ошибка"))failed++;}
         queueLabel.setText(jobs.isEmpty()?"Очередь пуста":
             "Файлов: "+jobs.size()+"  ·  "+Util.readable(size)+"\nГотово: "+finished+"   Ошибки: "+failed);
+        if(transferFileAdapter!=null){
+            transferFileAdapter.clear();
+            for(FileCatalog.Item file:jobs){
+                String sign="Передан".equals(file.status)?"✓ ":file.status.startsWith("Ошибка")?"! ":"○ ";
+                transferFileAdapter.add(sign+file.name+" · "+Util.readable(Math.max(0,file.size)));
+            }
+            transferFileAdapter.notifyDataSetChanged();
+        }
     }
     private void updateDynamic(){
         if(status!=null){
             long done=Math.max(0,TransferService.progress), size=Math.max(0,TransferService.total);
+            if(transferCard!=null&&size>0&&transferCard.getVisibility()!=View.VISIBLE){
+                transferCard.setVisibility(View.VISIBLE);
+                if(motion()){
+                    transferCard.setAlpha(0f);transferCard.setTranslationY(dp(8));
+                    transferCard.animate().alpha(1f).translationY(0f).setDuration(175).start();
+                }
+            }
             String active=TransferService.activeFile;
             String phase=TransferService.transferDirection;
             if(!active.equals(visibleFile)||size<=0||done<visibleBytes){
@@ -1145,8 +1186,9 @@ public final class MainActivity extends Activity {
                     "Отправка в фоне · экран можно заблокировать"):TransferService.status);
             int permille=size>0?(int)Math.min(1000,shown*1000d/size):0;
             if(progress!=null)progress.setProgress(permille);
-            if(transferName!=null)
-                transferName.setText(active.isEmpty()?"Ожидание передачи":active);
+            if(transferName!=null&&!active.equals(transferName.getText().toString())){
+                transferName.setText(active);transferName.setSelected(true);
+            }
             if(transferPercent!=null)
                 transferPercent.setText(size>0?(permille/10)+"%":"0%");
             if(transferSize!=null)

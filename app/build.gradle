@@ -7,8 +7,8 @@ android {
         applicationId = 'dev.xarkon.link'
         minSdk = 29
         targetSdk = 35
-        versionCode = 41
-        versionName = '0.3.36'
+        versionCode = 42
+        versionName = '0.3.37'
     }
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_17
