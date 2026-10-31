@@ -151,17 +151,54 @@ public final class QrScannerActivity extends Activity implements SurfaceHolder.C
         if(!finished.compareAndSet(false,true))return;
         setResult(RESULT_OK,new Intent().putExtra("qr",value));finish();}
     @Override protected void onDestroy(){decoder.shutdownNow();super.onDestroy();}
-    @Override protected void onActivityResult(int req,int result,Intent data){super.onActivityResult(req,result,data);
+    /** Read only bounded QR pixels. Never decode a multi-megapixel gallery photo on the UI thread. */
+    private String decodeGalleryQr(Uri uri) throws Exception {
+        BitmapFactory.Options bounds=new BitmapFactory.Options();
+        bounds.inJustDecodeBounds=true;
+        try(java.io.InputStream in=getContentResolver().openInputStream(uri)){
+            if(in==null)throw new java.io.IOException("Изображение недоступно");
+            BitmapFactory.decodeStream(in,null,bounds);
+        }
+        int sample=GalleryImagePolicy.sampleSize(bounds.outWidth,bounds.outHeight);
+        BitmapFactory.Options options=new BitmapFactory.Options();
+        options.inSampleSize=sample;
+        options.inPreferredConfig=Bitmap.Config.ARGB_8888;
+        Bitmap bitmap;
+        try(java.io.InputStream in=getContentResolver().openInputStream(uri)){
+            if(in==null)throw new java.io.IOException("Изображение недоступно");
+            bitmap=BitmapFactory.decodeStream(in,null,options);
+        }
+        if(bitmap==null)throw new java.io.IOException("Изображение не прочитано");
+        try{
+            int w=bitmap.getWidth(),h=bitmap.getHeight();
+            if((long)w*h>GalleryImagePolicy.MAX_PIXELS)
+                throw new java.io.IOException("Изображение слишком большое");
+            int[] pixels=new int[w*h];
+            bitmap.getPixels(pixels,0,w,0,0,w,h);
+            // decodeY also tries both rotations, so photos with EXIF orientation
+            // can be scanned without allocating additional full-size bitmaps.
+            return decodeY(new RGBLuminanceSource(w,h,pixels).getMatrix(),w,h);
+        }finally{bitmap.recycle();}
+    }
+    @Override protected void onActivityResult(int req,int result,Intent data){
+        super.onActivityResult(req,result,data);
         if(req!=22||result!=RESULT_OK||data==null||data.getData()==null)return;
-        try{Uri uri=data.getData();android.graphics.Bitmap bitmap;
-            try(java.io.InputStream in=getContentResolver().openInputStream(uri)){
-                android.graphics.BitmapFactory.Options o=new android.graphics.BitmapFactory.Options();o.inSampleSize=2;
-                bitmap=BitmapFactory.decodeStream(in,null,o);
-            }
-            if(bitmap==null)throw new Exception("Фотография не прочитана");
-            int w=bitmap.getWidth(),h=bitmap.getHeight();int[] pixels=new int[w*h];bitmap.getPixels(pixels,0,w,0,0,w,h);
-            String text=decodeSource(new RGBLuminanceSource(w,h,pixels));bitmap.recycle();
-            if(text!=null)finishWith(text);else notice.setText("QR не распознан. Попробуйте другое фото.");
-        }catch(Exception e){notice.setText("Ошибка изображения: "+e.getMessage());}
+        Uri uri=data.getData();
+        try{
+            decoder.execute(()->{
+                String found=null;
+                try{found=decodeGalleryQr(uri);}
+                catch(Exception | OutOfMemoryError failure){
+                    if(!isFinishing()&&!isDestroyed())runOnUiThread(
+                        ()->notice.setText("Не удалось прочитать изображение. Выберите другой файл."));
+                    return;
+                }
+                final String decoded=found;
+                if(!isFinishing()&&!isDestroyed())runOnUiThread(()->{
+                    if(decoded!=null)finishWith(decoded);
+                    else notice.setText("QR не распознан. Попробуйте другое фото.");
+                });
+            });
+        }catch(java.util.concurrent.RejectedExecutionException ignored){}
     }
 }
