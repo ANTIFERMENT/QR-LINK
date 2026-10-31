@@ -137,17 +137,20 @@ public final class TransferEngine {
                 long start=(long)index*Util.CHUNK;
                 long expected=Math.min(Util.CHUNK,inc.size-start);
                 if(contentLength!=expected){reply(out,400,"Bad Request",error("Неверная длина блока"));return;}
-                boolean already;
+                boolean already, fullyReceived;
                 synchronized(inc){
                     already=inc.done.get(index);
+                    fullyReceived=inc.done.cardinality()==inc.count;
                     if(!already){
                         if(inc.writing.get(index)){reply(out,409,"Conflict",error("Блок уже загружается"));return;}
                         inc.writing.set(index);
                     }
                 }
                 if(already){
-                    // A lost acknowledgement must still be verified. Hash the
-                    // persisted bytes instead of trusting a previous HTTP 200.
+                    // The final chunk may have been saved but publication failed.
+                    // Retry publishing before acknowledging a previously received
+                    // chunk, so the sender cannot report a false success.
+                    if(fullyReceived)complete(inc);
                     reply(out,200,"OK",new JSONObject().put("already",true)
                         .put("sha256",storedSha256(inc,index)));return;
                 }
@@ -324,20 +327,32 @@ public final class TransferEngine {
             incoming.put(in.id,in);
         }catch(Exception ignored){}
     }
-    private void complete(Incoming inc){
-        synchronized(inc){if(inc.completed)return;inc.completed=true;}
-        try{
-            // Flush a single shared descriptor at final publication.
-            // When resumed from a previous process, open once for final sync.
-            if(inc.outputChannel!=null)closeDestination(inc,true);
-            else try (ParcelFileDescriptor sync=context.getContentResolver().openFileDescriptor(inc.uri,"rw")) {
-                if(sync!=null)try{sync.getFileDescriptor().sync();}
-                    catch(IOException unsupported){ /* Some document providers don't support fsync. */ }
+    private void complete(Incoming inc)throws IOException{
+        synchronized(inc){
+            if(inc.completed)return;
+            try{
+                // A saved chunk is not a published download. Keep completion
+                // retryable until the final sync and MediaStore update succeed.
+                if(inc.outputChannel!=null){
+                    inc.outputChannel.force(true);
+                    closeDestination(inc,false);
+                }else try(ParcelFileDescriptor sync=context.getContentResolver().openFileDescriptor(inc.uri,"rw")){
+                    if(sync==null)throw new IOException("Файл назначения недоступен");
+                    try{sync.getFileDescriptor().sync();}
+                    catch(java.io.SyncFailedException unsupported){
+                        // Some Android storage providers do not implement fsync.
+                    }
+                }
+                ContentValues cv=new ContentValues();
+                cv.put(MediaStore.Downloads.IS_PENDING,0);
+                if(context.getContentResolver().update(inc.uri,cv,null,null)!=1)
+                    throw new IOException("MediaStore не подтвердил публикацию файла");
+                inc.completed=true;
+            }catch(Exception failure){
+                throw new IOException("Не удалось завершить приём "+inc.name+": "+failure.getMessage(),failure);
             }
-            ContentValues cv=new ContentValues();cv.put(MediaStore.Downloads.IS_PENDING,0);
-            context.getContentResolver().update(inc.uri,cv,null,null);
-            events.note("Получено: "+inc.name+" ("+Util.readable(inc.size)+")");
-        }catch(Exception e){events.note("Ошибка публикации "+inc.name+": "+e.getMessage());}
+        }
+        events.note("Получено: "+inc.name+" ("+Util.readable(inc.size)+")");
     }
 
     public void send(String host,int port,String userPin,List<FileCatalog.Item> jobs,int lanes)throws Exception{
