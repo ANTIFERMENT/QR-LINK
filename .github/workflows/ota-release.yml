@@ -145,8 +145,8 @@ jobs:
           NOTES="release_notes/$RELEASE_TAG.txt"
           test -s "$NOTES" || { echo "::error::Missing non-empty release notes: $NOTES"; exit 1; }
           if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            echo "::notice::Version $RELEASE_TAG was already released. Change versionName and versionCode for the next release."
-            exit 0
+            echo "::error::Version $RELEASE_TAG already exists. Refusing to treat an existing release as a successful new publication; increase versionName and versionCode."
+            exit 1
           fi
           gh release create "$RELEASE_TAG" dist/QR-LINK.apk dist/update.json "$NOTES" \
             --repo "$GITHUB_REPOSITORY" \

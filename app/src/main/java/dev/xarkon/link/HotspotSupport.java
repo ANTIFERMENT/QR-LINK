@@ -31,7 +31,13 @@ public final class HotspotSupport {
         synchronized(this){if(requesting||reservation!=null)return;requesting=true;requestGeneration=++generation;}
         try{
             WifiManager manager=(WifiManager)context.getApplicationContext().getSystemService(Context.WIFI_SERVICE);
-            if(manager==null){synchronized(this){requesting=false;}listener.failure("Система не предоставляет Wi-Fi API");return;}
+            if(manager==null){
+                synchronized(this){
+                    if(requestGeneration!=generation)return;
+                    requesting=false;generation++;
+                }
+                listener.failure("Система не предоставляет Wi-Fi API");return;
+            }
             manager.startLocalOnlyHotspot(new WifiManager.LocalOnlyHotspotCallback(){
                 @Override public void onStarted(WifiManager.LocalOnlyHotspotReservation r){
                     synchronized(HotspotSupport.this){
@@ -49,20 +55,45 @@ public final class HotspotSupport {
                             ssid=cfg.SSID;pass=cfg.preSharedKey;
                         }
                         if(ssid==null||pass==null)throw new IllegalStateException("Система не вернула пароль Wi-Fi");
-                        listener.ready(stripQuotes(ssid),stripQuotes(pass),security,hotspotIp());
-                    }catch(Exception e){stop();listener.failure("Не удалось прочитать параметры точки: "+e.getMessage());}
+                        // Do not publish stale credentials if stop() or a new request intervened.
+                        String host=hotspotIp();
+                        synchronized(HotspotSupport.this){
+                            if(requestGeneration!=generation||reservation!=r)return;
+                            listener.ready(stripQuotes(ssid),stripQuotes(pass),security,host);
+                        }
+                    }catch(Exception e){
+                        synchronized(HotspotSupport.this){
+                            if(requestGeneration!=generation||reservation!=r)return;
+                            stop();
+                        }
+                        listener.failure("Не удалось прочитать параметры точки: "+e.getMessage());
+                    }
                 }
                 @Override public void onStopped(){
                     boolean unexpected;
-                    synchronized(HotspotSupport.this){unexpected=reservation!=null;reservation=null;requesting=false;}
+                    synchronized(HotspotSupport.this){
+                        // Android may deliver onStopped after a replacement hotspot starts.
+                        if(requestGeneration!=generation)return;
+                        unexpected=reservation!=null||requesting;
+                        reservation=null;requesting=false;generation++;
+                    }
                     if(unexpected)listener.failure("Локальная точка доступа остановлена системой");
                 }
                 @Override public void onFailed(int reason){
-                    synchronized(HotspotSupport.this){requesting=false;reservation=null;}
+                    synchronized(HotspotSupport.this){
+                        if(requestGeneration!=generation)return;
+                        requesting=false;reservation=null;generation++;
+                    }
                     listener.failure("Android не запустил точку доступа (код "+reason+"). Проверьте настройки Wi-Fi");
                 }
             },new Handler(Looper.getMainLooper()));
-        }catch(Exception e){synchronized(this){requesting=false;}listener.failure("Точка доступа: "+e.getMessage());}
+        }catch(Exception e){
+            synchronized(this){
+                if(requestGeneration!=generation)return;
+                requesting=false;generation++;
+            }
+            listener.failure("Точка доступа: "+e.getMessage());
+        }
     }
     public synchronized void stop(){
         generation++;
