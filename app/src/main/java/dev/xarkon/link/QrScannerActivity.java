@@ -108,7 +108,7 @@ public final class QrScannerActivity extends Activity implements SurfaceHolder.C
             int orientation=(info.orientation-degrees+360)%360;
             camera.setDisplayOrientation(orientation);
             camera.setPreviewDisplay(surface.getHolder());camera.setPreviewCallback(this);camera.startPreview();
-        }catch(Exception e){releaseCamera();notice.setText("Камера недоступна: "+e.getMessage()+". Можно выбрать фото QR из галереи.");}
+        }catch(Exception e){releaseCamera();notice.setText(ErrorText.human("Камера недоступна: "+e.getMessage())+". Можно выбрать QR из галереи.");}
     }
     private void releaseCamera(){Camera c=camera;camera=null;if(c!=null){try{c.setPreviewCallback(null);c.stopPreview();c.release();}catch(Exception ignored){}}}
     private void toggleTorch(){if(camera==null)return;try{Camera.Parameters p=camera.getParameters();

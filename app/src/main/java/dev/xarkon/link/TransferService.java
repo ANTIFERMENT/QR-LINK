@@ -317,6 +317,7 @@ public final class TransferService extends Service implements TransferEngine.Eve
         });
     }
     @Override public void note(String message){
+        message=ErrorText.human(message);
         detail=message;status=message;
         android.content.SharedPreferences prefs=getSharedPreferences("history",0);
         String old=prefs.getString("log","");

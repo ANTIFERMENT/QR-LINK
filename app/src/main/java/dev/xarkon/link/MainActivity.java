@@ -1379,7 +1379,7 @@ public final class MainActivity extends Activity {
                     .putString("key",info.key).putString("peer_name",check.optString("deviceName","Получатель")).apply();
                 runOnUiThread(()->{navigate(SEND);toast("QR принят. Можно отправлять файлы.");});
             }catch(Exception e){runOnUiThread(()->new AlertDialog.Builder(this).setTitle("Не удалось подключиться")
-                .setMessage(e.getMessage()+"\n\nУбедитесь, что оба телефона подключены к одной сети и получатель показывает активный QR-код.")
+                .setMessage(ErrorText.human(e.getMessage())+"\n\nПроверьте наличие общего локального соединения и активный QR-код.")
                 .setPositiveButton("Повторить",(d,w)->startScanner()).setNegativeButton("Закрыть",null).show());}
         },"qr-connect-check").start();
     }
@@ -1477,5 +1477,5 @@ public final class MainActivity extends Activity {
     private void launchService(Intent intent){try{
         if(TransferService.STOP.equals(intent.getAction()))startService(intent);else startForegroundService(intent);
     }catch(Exception e){toast("Служба: "+e.getMessage());}}
-    private void toast(String text){Toast.makeText(this,text,Toast.LENGTH_LONG).show();}
+    private void toast(String text){Toast.makeText(this,ErrorText.human(text),Toast.LENGTH_LONG).show();}
 }

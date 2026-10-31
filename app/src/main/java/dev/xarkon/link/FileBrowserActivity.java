@@ -679,7 +679,7 @@ public final class FileBrowserActivity extends Activity {
                 ui.post(()->{setResult(RESULT_OK,new Intent());finish();});
             }catch(Exception e){
                 ui.post(()->{busy=false;action.setText("ОТПРАВИТЬ");
-                    updateCount();Toast.makeText(this,"Ошибка: "+e.getMessage(),Toast.LENGTH_LONG).show();});
+                    updateCount();Toast.makeText(this,ErrorText.human("Ошибка: "+e.getMessage()),Toast.LENGTH_LONG).show();});
             }
         });
     }
