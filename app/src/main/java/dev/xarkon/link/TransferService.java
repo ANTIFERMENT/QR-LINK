@@ -81,6 +81,10 @@ public final class TransferService extends Service implements TransferEngine.Eve
     }
     private void unlock(){if(wake!=null&&wake.isHeld())wake.release();
         if(wifiLock!=null&&wifiLock.isHeld())wifiLock.release();}
+    // An established QR pairing is not an active transfer. Release the CPU and
+    // high-performance Wi-Fi locks when idle; SEND acquires them again.
+    // Receiving keeps its locks while the server is listening in the background.
+    private void unlockIfIdle(){if(!isReceiving&&!isBusy)unlock();}
     @Override public int onStartCommand(Intent in,int flags,int startId){
         if(in==null)return START_NOT_STICKY;
         String action=in.getAction();
@@ -189,7 +193,7 @@ public final class TransferService extends Service implements TransferEngine.Eve
             @Override public void failure(String reason){
                 peerState="Не удалось подключиться: "+reason;
                 note(peerState);
-                if(!isReceiving&&!isBusy)unlock();
+                unlockIfIdle();
             }
         });
     }
@@ -201,12 +205,14 @@ public final class TransferService extends Service implements TransferEngine.Eve
                 if(!"XARKON LINK".equals(hello.optString("app")))throw new Exception("Несовместимый приёмник");
                 getSharedPreferences("settings",0).edit().putString("host",host).putInt("port",info.port)
                     .putString("key",info.key).apply();
-                peerState="Подключено по QR · готово к отправке";status=peerState;refresh();
+                peerState="Подключено по QR · готово к отправке";status=peerState;
+                unlockIfIdle();refresh();
             }catch(Exception e){
                 if(info.direct&&p2pPath){
                     peerState="Wi-Fi Direct подключён, но приёмник не отвечает. Пробуем резервный маршрут";refresh();
                     fallbackWifi(info);
-                }else{peerState="Ошибка проверки приёмника: "+e.getMessage();note(peerState);}
+                }else{peerState="Ошибка проверки приёмника: "+e.getMessage();note(peerState);
+                    unlockIfIdle();}
             }
         });
     }
@@ -219,7 +225,7 @@ public final class TransferService extends Service implements TransferEngine.Eve
             finally{isBusy=false;busy.set(false);progress=0;total=0;bytesPerSecond=0;activeFile="";transferDirection="";
                 status=isReceiving?(directReady?"Wi-Fi Direct активен": "Приём включён · "+Util.ip()+":"+Util.PORT):
                     (!peerState.isEmpty()?peerState:"Готов к работе");
-                if(!isReceiving&&peerState.isEmpty())unlock();refresh();}
+                unlockIfIdle();refresh();}
         });
     }
     @Override public void note(String message){
