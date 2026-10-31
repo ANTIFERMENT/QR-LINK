@@ -1,7 +1,6 @@
 package dev.xarkon.link;
 
 import android.net.Uri;
-import java.net.InetAddress;
 
 /** The QR code is an ephemeral invitation for the currently running receiver. */
 public final class Pairing {
@@ -44,22 +43,32 @@ public final class Pairing {
         if(value==null||value.length()==0||value.length()>4096)
             throw new Exception("Некорректная длина QR-кода");
         Uri u=Uri.parse(value.trim());
-        if(!"xarkonlink".equals(u.getScheme())||!"pair".equals(u.getAuthority())
-                ||!("2".equals(u.getQueryParameter("v"))||"3".equals(u.getQueryParameter("v"))||"4".equals(u.getQueryParameter("v"))))throw new Exception("Неподдерживаемый QR-код QR LINK");
+        // External scanners may pass opaque or malformed URIs. Never let
+        // getQueryParameter() throw an Android runtime exception.
+        if(!u.isHierarchical()||!"xarkonlink".equals(u.getScheme())||
+                !"pair".equals(u.getAuthority())||
+                (u.getPath()!=null&&!u.getPath().isEmpty())||u.getFragment()!=null)
+            throw new Exception("Неподдерживаемый QR-код QR LINK");
+        // Reject ambiguous duplicate fields rather than silently using the first value.
+        for(String field:new String[]{"v","host","port","key","ap","ssid","pwd","sec","p2p","mac"}){
+            if(u.getQueryParameters(field).size()>1)
+                throw new Exception("Повторяющийся параметр QR: "+field);
+        }
+        String version=u.getQueryParameter("v");
+        if(!("2".equals(version)||"3".equals(version)||"4".equals(version)))
+            throw new Exception("Неподдерживаемая версия QR LINK");
         String host=u.getQueryParameter("host"),key=u.getQueryParameter("key");
-        boolean direct="4".equals(u.getQueryParameter("v"))&&"1".equals(u.getQueryParameter("p2p"));
-        boolean ap=("3".equals(u.getQueryParameter("v"))||direct)&&"1".equals(u.getQueryParameter("ap"));
+        boolean direct="4".equals(version)&&"1".equals(u.getQueryParameter("p2p"));
+        boolean ap=("3".equals(version)||direct)&&"1".equals(u.getQueryParameter("ap"));
         if(host==null)host="";
         if(!host.isEmpty()){
-            if(!host.matches("(?:[0-9]{1,3}\\.){3}[0-9]{1,3}"))throw new Exception("Неверный IP в QR");
-            InetAddress addr=InetAddress.getByName(host);
-            if(!addr.isSiteLocalAddress()&&!addr.isLinkLocalAddress())throw new Exception("QR указывает не на локальный адрес");
+            if(!QrInputValidation.isLocalIpv4(host))
+                throw new Exception("Неверный или нелокальный IP в QR");
         }else if(!ap)throw new Exception("В QR отсутствует IP");
         if(key==null||!key.matches("[0-9a-f]{64}"))throw new Exception("Неверный ключ QR");
-        int port=Integer.parseInt(u.getQueryParameter("port"));
-        if(port!=Util.PORT)throw new Exception("Несовместимый порт");
+        int port=QrInputValidation.requirePort(u.getQueryParameter("port"),Util.PORT);
         String ssid=ap?u.getQueryParameter("ssid"):"", password=ap?u.getQueryParameter("pwd"):"";
-        int security=ap?Integer.parseInt(u.getQueryParameter("sec")):0;
+        int security=ap?QrInputValidation.security(u.getQueryParameter("sec")):0;
         if(ap&&(ssid==null||ssid.isEmpty()||ssid.length()>64||password==null||password.length()<8||password.length()>63))
             throw new Exception("Некорректные параметры точки доступа");
         String mac=direct?u.getQueryParameter("mac"):"";
