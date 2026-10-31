@@ -28,7 +28,7 @@ import java.util.concurrent.*;
 /** Permission-aware in-app browser. SAF is used only to grant access to external folders. */
 public final class FileBrowserActivity extends Activity {
     private static final String[] TABS={"Картинки","Видео","Музыка","Приложения","Файлы"};
-    private static final int PICK_TREE=501,MEDIA_PERMISSION=502,MAX_QUEUE=5000,MAX_VISIBLE=60;
+    private static final int PICK_TREE=501,MEDIA_PERMISSION=502,MAX_QUEUE=5000,MAX_VISIBLE=60,MAX_MEDIA_SCAN=25000;
     private final ExecutorService io=Executors.newSingleThreadExecutor();
     private final ExecutorService previews=Executors.newFixedThreadPool(2);
     private final LruCache<String,Bitmap> previewCache=new LruCache<String,Bitmap>(8*1024*1024){
@@ -52,7 +52,7 @@ public final class FileBrowserActivity extends Activity {
     private String mediaPath="",folderPath="",folderId="";
     private Uri tree;
     private boolean busy=false;
-    private boolean safTruncated=false;
+    private boolean safTruncated=false,mediaTruncated=false;
     // Cancel obsolete provider queries when navigating quickly between tabs/folders.
     private CancellationSignal activeQuery;
     private final Handler ui=new Handler(Looper.getMainLooper());
@@ -179,7 +179,7 @@ public final class FileBrowserActivity extends Activity {
     private void switchTab(int index){
         tab=index;page=0;tree=null;folderId="";folderPath="";mediaPath="";history.clear();
         // Do not expose the previous tab's entries while the new provider query is pending.
-        current.clear();safTruncated=false;
+        current.clear();safTruncated=false;mediaTruncated=false;
         ui.removeCallbacks(searchRefresh);
         search.setText("");updateTabs();load();
     }
@@ -248,7 +248,8 @@ public final class FileBrowserActivity extends Activity {
                 ArrayList<Entry> result=cat<3?queryMedia(cat,mediaFolder,false,signal):cat==3?queryApps(signal):
                     queryDocuments(rootTree,doc,displayPath,signal);
                 ui.post(()->{if(token!=serial||isFinishing())return;
-                    safTruncated=result instanceof Entries&&((Entries)result).truncated;
+                    safTruncated=cat==4&&result instanceof Entries&&((Entries)result).truncated;
+                    mediaTruncated=cat<3&&result instanceof Entries&&((Entries)result).truncated;
                     current.clear();current.addAll(result);render();});
             }catch(Exception ex){
                 ui.post(()->{if(token==serial&&!isFinishing())
@@ -265,7 +266,12 @@ public final class FileBrowserActivity extends Activity {
         return queryMedia(cat,prefix,complete,null);
     }
     private ArrayList<Entry> queryMedia(int cat,String prefix,boolean complete,CancellationSignal cancellation){
-        ArrayList<Entry> result=new ArrayList<>();
+        Entries result=new Entries();
+        // A gallery of the newest 5000 files may hide entire older folders.
+        // Scan a bounded number of metadata rows for folder names, without
+        // retaining more than MAX_QUEUE files or decoding thumbnails.
+        LinkedHashMap<String,Entry> folders=new LinkedHashMap<>();
+        int kept=0,scanned=0;
         Uri base=collection(cat);
         String[] cols={MediaStore.MediaColumns._ID,MediaStore.MediaColumns.DISPLAY_NAME,
             MediaStore.MediaColumns.SIZE,MediaStore.MediaColumns.DATE_MODIFIED,
@@ -277,21 +283,39 @@ public final class FileBrowserActivity extends Activity {
             if(c==null)throw new IllegalStateException("Медиатека недоступна");
             while(c.moveToNext()){
                 if(cancellation!=null&&cancellation.isCanceled())throw new OperationCanceledException();
+                if(!complete&&++scanned>MAX_MEDIA_SCAN){result.truncated=true;break;}
                 String path=c.isNull(5)?"":c.getString(5);
-                // Check the actual path too: SQL LIKE treats % and _ as wildcards.
+                // SQL LIKE treats % and _ as wildcards; check the real path.
                 if(!path.startsWith(prefix))continue;
-                if(result.size()>=MAX_QUEUE){
+                if(!complete){
+                    String remaining=path.substring(prefix.length());
+                    int slash=remaining.indexOf('/');
+                    if(slash>0){
+                        String segment=remaining.substring(0,slash);
+                        String folderPath=prefix+segment+"/";
+                        Entry folder=folders.get(folderPath);
+                        if(folder==null){
+                            folder=new Entry();folder.folder=true;folder.mediaFolder=true;
+                            folder.group=TABS[cat];folder.path=folderPath;folder.name=segment;
+                            folders.put(folderPath,folder);
+                        }
+                        folder.date=Math.max(folder.date,c.isNull(3)?0:c.getLong(3));
+                    }
+                }
+                if(kept>=MAX_QUEUE){
                     if(complete)throw new IllegalStateException(
                         "В папке больше 5000 файлов. Выберите меньшую папку или отдельные файлы.");
-                    break;
+                    result.truncated=true;
+                    continue;
                 }
                 Entry e=new Entry();e.uri=ContentUris.withAppendedId(base,c.getLong(0));
                 e.name=Util.safeName(c.getString(1));e.size=c.isNull(2)?-1:c.getLong(2);
                 e.date=c.isNull(3)?0:c.getLong(3);
                 e.mime=c.getString(4);e.path=path;
-                result.add(e);
+                result.add(e);kept++;
             }
         }
+        if(!complete)result.addAll(folders.values());
         return result;
     }
     private ArrayList<Entry> queryApps(CancellationSignal cancellation){
@@ -376,6 +400,7 @@ public final class FileBrowserActivity extends Activity {
         if(isMedia()){
             String prefix=mediaPath;LinkedHashMap<String,Entry> folders=new LinkedHashMap<>();
             for(Entry e:current){
+                if(e.mediaFolder){folders.putIfAbsent(e.path,e);continue;}
                 if(!e.path.startsWith(prefix))continue;
                 String remain=e.path.substring(prefix.length());
                 if(!remain.isEmpty()){
@@ -423,8 +448,8 @@ public final class FileBrowserActivity extends Activity {
             TextView cap=label("Каталог очень большой: показана только часть содержимого. Для полного выбора откройте вложенную папку или предоставьте доступ к более узкому каталогу.",12,muted,false);
             pad(cap,10,12);list.addView(cap);
         }
-        if(isMedia()&&mediaPath.isEmpty()&&current.size()>=MAX_QUEUE){
-            TextView cap=label("Показаны последние 5000 файлов. Для более старых используйте выбор папки.",12,muted,false);
+        if(isMedia()&&mediaTruncated){
+            TextView cap=label("Список файлов ограничен 5000, поиск папок — первыми 25 000 записями. Для полного доступа к старым файлам откройте нужную папку в разделе «Файлы».",12,muted,false);
             pad(cap,10,12);list.addView(cap);
         }
     }
