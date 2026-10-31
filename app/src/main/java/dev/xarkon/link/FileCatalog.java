@@ -11,6 +11,7 @@ import java.util.*;
 
 public final class FileCatalog {
     public static final String PREF="xarkon_queue";
+    private static final int MAX_FOLDER_FILES=12000;
     private FileCatalog(){}
     // Queue metadata is a JSON snapshot. Per-file status changes must not
     // deserialize and rewrite thousands of unrelated entries after every file.
@@ -122,7 +123,7 @@ public final class FileCatalog {
         return result;
     }
     private static void collect(Context c,Uri tree,String docId,String path,ArrayList<Item> result,int depth)throws Exception{
-        if(depth>24||result.size()>12000)throw new IllegalStateException("Папка слишком велика: максимум 12000 файлов / 24 уровня");
+        if(depth>24||result.size()>MAX_FOLDER_FILES)throw new IllegalStateException("Папка слишком велика: максимум 12000 файлов / 24 уровня");
         Uri children=DocumentsContract.buildChildDocumentsUriUsingTree(tree,docId);
         String[]cols={DocumentsContract.Document.COLUMN_DOCUMENT_ID,DocumentsContract.Document.COLUMN_DISPLAY_NAME,
                 DocumentsContract.Document.COLUMN_MIME_TYPE,DocumentsContract.Document.COLUMN_SIZE};
@@ -141,7 +142,7 @@ public final class FileCatalog {
                     it.path=path;it.status="В очереди";
                     it.size=cursor.isNull(3)?-1:cursor.getLong(3);
                     result.add(it);
-                    if(result.size()>12000)throw new IllegalStateException("Больше 12000 файлов");
+                    if(result.size()>MAX_FOLDER_FILES)throw new IllegalStateException("Больше 12000 файлов");
                 }
             }
         }

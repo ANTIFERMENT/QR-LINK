@@ -28,7 +28,7 @@ import java.util.concurrent.*;
 /** Permission-aware in-app browser. SAF is used only to grant access to external folders. */
 public final class FileBrowserActivity extends Activity {
     private static final String[] TABS={"Картинки","Видео","Музыка","Приложения","Файлы"};
-    private static final int PICK_TREE=501,MEDIA_PERMISSION=502,MAX_QUEUE=12000,MAX_VISIBLE=60,MAX_MEDIA_SCAN=212000;
+    private static final int PICK_TREE=501,MEDIA_PERMISSION=502,MAX_QUEUE=12000,MAX_VISIBLE=60,MAX_MEDIA_SCAN=25000,MAX_SAF_SCAN=50000;
     private final ExecutorService io=Executors.newSingleThreadExecutor();
     private final ExecutorService previews=Executors.newFixedThreadPool(2);
     private final LruCache<String,Bitmap> previewCache=new LruCache<String,Bitmap>(8*1024*1024){
@@ -378,7 +378,7 @@ public final class FileBrowserActivity extends Activity {
             int scanned=0;
             while(c.moveToNext()){
                 if(cancellation.isCanceled())throw new OperationCanceledException();
-                if(++scanned>120000){result.truncated=true;break;}
+                if(++scanned>MAX_SAF_SCAN){result.truncated=true;break;}
                 Entry e=new Entry();e.docId=c.getString(0);e.name=Util.safeName(c.getString(1));
                 e.mime=c.getString(2);e.folder=DocumentsContract.Document.MIME_TYPE_DIR.equals(e.mime);
                 e.size=c.isNull(3)?-1:c.getLong(3);e.date=c.isNull(4)?0:c.getLong(4)/1000;
