@@ -289,7 +289,8 @@ public final class TransferService extends Service implements TransferEngine.Eve
                 org.json.JSONObject hello=new org.json.JSONObject(Util.http(host,info.port,info.key,"/hello","GET",null));
                 if(!"XARKON LINK".equals(hello.optString("app")))throw new Exception("Несовместимый приёмник");
                 getSharedPreferences("settings",0).edit().putString("host",host).putInt("port",info.port)
-                    .putString("key",info.key).apply();
+                    .putString("key",info.key)
+                    .putString("peer_name",hello.optString("deviceName","Получатель")).apply();
                 peerState="Подключено по QR · готово к отправке";status=peerState;
                 unlockIfIdle();refresh();
             }catch(Exception e){

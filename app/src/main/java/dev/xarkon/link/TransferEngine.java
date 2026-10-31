@@ -117,7 +117,10 @@ public final class TransferEngine {
             }
             String path=pieces[1];String method=pieces[0];
             if(method.equals("GET")&&path.equals("/hello")){
-                reply(out,200,"OK",new JSONObject().put("app","XARKON LINK").put("version",1).put("sha256",true));return;
+                reply(out,200,"OK",new JSONObject().put("app","XARKON LINK")
+                    .put("version",1).put("sha256",true)
+                    .put("deviceName",context.getSharedPreferences("settings",0)
+                        .getString("device_name",android.os.Build.MANUFACTURER+" "+android.os.Build.MODEL)));return;
             }
             long contentLength;
             try{contentLength=Long.parseLong(heads.getOrDefault("content-length","-1"));}

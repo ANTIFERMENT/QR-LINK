@@ -70,6 +70,7 @@ public final class MainActivity extends Activity {
     private LinearLayout content,root;
     private TextView status,progressText,queueLabel,pairLabel,receiveHint,receiveCaption,networkBadge;
     private TextView transferName,transferPercent,transferSize,transferRate,transferHeading;
+    private boolean displayedPairState;
     private LinearLayout transferCard;
     private ListView transferFileList;
     private ArrayAdapter<String> transferFileAdapter;
@@ -713,10 +714,27 @@ public final class MainActivity extends Activity {
     }
     private boolean paired(){return prefs().getString("key","").matches("[0-9a-f]{64}")&&!prefs().getString("host","").isEmpty();}
     private void sendPage(){
-        LinearLayout connect=panel("Подключение по QR","Никаких адресов или PIN: наведи камеру на QR-код получателя.","scan");
-        pairLabel=text("Ожидаем сканирование QR-кода",14,paired()?accent:muted,true);margin(connect,pairLabel,13);
-        button(connect,"scan",paired()?"СКАНИРОВАТЬ ДРУГОЙ QR":"СКАНИРОВАТЬ QR-КОД",true,this::startScanner);
-        if(paired())outlineButton(connect,"check","Проверить подключение",this::validatePaired);
+        displayedPairState=paired();
+        if(displayedPairState){
+            String name=prefs().getString("peer_name","Получатель");
+            LinearLayout connected=panel("Устройство: "+name,
+                "Соединение установлено · готово к передаче","wifi");
+            pairLabel=text("Подключено",14,accent,true);
+            margin(connected,pairLabel,12);
+            outlineButton(connected,"link","ПЕРЕПОДКЛЮЧИТЬСЯ",this::validatePaired);
+            outlineButton(connected,"trash","РАЗОРВАТЬ СОЕДИНЕНИЕ",()->{
+                prefs().edit().remove("host").remove("key").remove("port")
+                    .remove("peer_name").apply();
+                TransferService.peerState="";
+                show();
+            });
+        }else{
+            LinearLayout connect=panel("Подключение по QR",
+                "Наведите камеру на QR-код получателя.","scan");
+            pairLabel=text("Ожидаем QR-код",14,muted,true);
+            margin(connect,pairLabel,13);
+            button(connect,"scan","СКАНИРОВАТЬ QR-КОД",true,this::startScanner);
+        }
         liveStatus();
         LinearLayout queue=panel("Файлы и папки","Собственный проводник: картинки, видео, музыка, приложения и файлы.","folder");
         button(queue,"file","+ ОТКРЫТЬ ПРОВОДНИК",true,this::pickFilesOrFolder);
@@ -859,6 +877,19 @@ public final class MainActivity extends Activity {
             "Быстрые переходы и анимированные разделы","motion",true);
         settingToggle(animations,"flash","Тактильный отклик",
             "Короткая вибрация при нажатии","haptics",true);
+        LinearLayout device=section("device","Моё устройство",
+            "Название при подключении","apps",false);
+        EditText name=new EditText(this);name.setSingleLine(true);
+        name.setTextSize(15);name.setTextColor(fg);name.setHintTextColor(muted);
+        name.setHint("Имя устройства");
+        name.setText(prefs().getString("device_name",Build.MANUFACTURER+" "+Build.MODEL));
+        name.setBackground(shape(soft,stroke,14));
+        name.setPadding(dp(15),dp(13),dp(15),dp(13));margin(device,name,9);
+        outlineButton(device,"check","СОХРАНИТЬ ИМЯ",()->{
+            String value=name.getText().toString().trim();
+            if(value.isEmpty()||value.length()>48){toast("Имя должно содержать от 1 до 48 символов");return;}
+            prefs().edit().putString("device_name",value).apply();toast("Имя устройства сохранено");
+        });
         LinearLayout performance=section("performance","Передача и скорость",
             "Потоки и замер реальной скорости","speed",false);
         streamSlider(performance);
@@ -1163,6 +1194,11 @@ public final class MainActivity extends Activity {
         }
     }
     private void updateDynamic(){
+        if(page==SEND&&pairLabel!=null&&displayedPairState!=paired()&&!TransferService.isBusy){
+            suppressEntranceAnimations=true;
+            try{show();}finally{suppressEntranceAnimations=false;}
+            return;
+        }
         if(status!=null){
             long done=Math.max(0,TransferService.progress), size=Math.max(0,TransferService.total);
             if(transferCard!=null&&size>0&&transferCard.getVisibility()!=View.VISIBLE){
@@ -1338,7 +1374,8 @@ public final class MainActivity extends Activity {
             try{
                 org.json.JSONObject check=new org.json.JSONObject(Util.http(info.host,info.port,info.key,"/hello","GET",null));
                 if(!"XARKON LINK".equals(check.optString("app")))throw new Exception("На этом устройстве не запущен совместимый приёмник QR LINK");
-                prefs().edit().putString("host",info.host).putInt("port",info.port).putString("key",info.key).apply();
+                prefs().edit().putString("host",info.host).putInt("port",info.port)
+                    .putString("key",info.key).putString("peer_name",check.optString("deviceName","Получатель")).apply();
                 runOnUiThread(()->{navigate(SEND);toast("QR принят. Можно отправлять файлы.");});
             }catch(Exception e){runOnUiThread(()->new AlertDialog.Builder(this).setTitle("Не удалось подключиться")
                 .setMessage(e.getMessage()+"\n\nУбедитесь, что оба телефона подключены к одной сети и получатель показывает активный QR-код.")
